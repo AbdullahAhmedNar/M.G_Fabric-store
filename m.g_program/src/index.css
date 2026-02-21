@@ -1,0 +1,89 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* flash effect for inventory row */
+.flash-red {
+  animation: flash-red 1.2s ease-in-out 1;
+}
+
+@keyframes flash-red {
+  0% { box-shadow: 0 0 0 0 rgba(220,38,38,0.8); }
+  50% { box-shadow: 0 0 0 8px rgba(220,38,38,0.15); }
+  100% { box-shadow: 0 0 0 0 rgba(220,38,38,0); }
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: 'Cairo', 'Tajawal', system-ui, sans-serif;
+  direction: rtl;
+}
+
+input[type="number"]::-webkit-inner-spin-button,
+input[type="number"]::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+input[type="number"] {
+  -moz-appearance: textfield;
+}
+
+/* Print styles for invoice */
+@media print {
+  body * {
+    visibility: hidden;
+  }
+  
+  .print-invoice, .print-invoice * {
+    visibility: visible;
+  }
+  
+  .print-invoice {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 300px !important;
+    max-width: 300px !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    box-shadow: none !important;
+    border: none !important;
+  }
+  
+  .print-invoice .print-hide {
+    display: none !important;
+  }
+  
+  .print-invoice .bg-gray-50 {
+    background-color: transparent !important;
+  }
+  
+  .print-invoice .border-t {
+    border-top: 1px solid #000 !important;
+  }
+  
+  .print-invoice .text-brown {
+    color: #8B4513 !important;
+  }
+  
+  .print-invoice .text-green-600 {
+    color: #059669 !important;
+  }
+  
+  .print-invoice .text-blue-600 {
+    color: #2563eb !important;
+  }
+  
+  .print-invoice .text-red-600 {
+    color: #dc2626 !important;
+  }
+}
+
+
+
