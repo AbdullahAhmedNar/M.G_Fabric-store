@@ -4,6 +4,7 @@ import { useNotification } from '../context/NotificationContext'
 import { exportStatisticsToExcel } from '../utils/exportExcel'
 import { formatNumber } from '../utils/format'
 import { apiUrl } from '../utils/api'
+import ConfirmDialog from '../components/ConfirmDialog'
 
 function Statistics() {
   const { theme } = useTheme()
@@ -12,6 +13,14 @@ function Statistics() {
   const [selectedPeriod, setSelectedPeriod] = useState('all')
   const [selectedYear, setSelectedYear] = useState('all')
   const [loading, setLoading] = useState(true)
+  const [expandedSections, setExpandedSections] = useState({})
+  const [topSellingSearch, setTopSellingSearch] = useState('')
+  const [deleteSectionDialogOpen, setDeleteSectionDialogOpen] = useState(false)
+  const [pendingDeleteSectionName, setPendingDeleteSectionName] = useState('')
+
+  const toggleSection = (sectionName) => {
+    setExpandedSections(prev => ({ ...prev, [sectionName]: !prev[sectionName] }))
+  }
 
   useEffect(() => {
     fetchStatistics()
@@ -50,6 +59,37 @@ function Statistics() {
   const handleRefresh = () => {
     fetchStatistics()
     addNotification('تم تحديث الإحصائيات', 'success')
+  }
+
+  const requestDeleteTopSellingSection = (sectionName) => {
+    const safeName = (sectionName || '').trim()
+    if (!safeName) return
+
+    setPendingDeleteSectionName(safeName)
+    setDeleteSectionDialogOpen(true)
+  }
+
+  const handleDeleteTopSellingSection = async () => {
+    const safeName = (pendingDeleteSectionName || '').trim()
+    if (!safeName) return
+
+    try {
+      const response = await fetch(
+        apiUrl(`/api/statistics/top-selling/section?name=${encodeURIComponent(safeName)}`),
+        { method: 'DELETE' }
+      )
+      const data = await response.json().catch(() => ({}))
+      if (!response.ok || data?.success === false) {
+        throw new Error(data?.message || 'فشل الحذف')
+      }
+      addNotification('تم حذف القسم من قائمة الأكثر مبيعاً', 'success')
+      fetchStatistics()
+    } catch (error) {
+      addNotification(error?.message || 'فشل حذف القسم', 'error')
+    } finally {
+      setDeleteSectionDialogOpen(false)
+      setPendingDeleteSectionName('')
+    }
   }
 
   const getPeriodData = (period) => {
@@ -1060,98 +1100,229 @@ function Statistics() {
         />
             </div>
 
-      {/* Top Selling Items */}
-      {topSelling && topSelling.length > 0 && (
-        <>
-          <SectionHeader
-            title="أكثر الأصناف مبيعاً"
-            icon={
-              <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6" />
-              </svg>
-            }
-            description="الأصناف الأكثر طلباً من العملاء"
-          />
-          
-          <div className={`rounded-xl border-2 ${
-            theme === 'dark' ? 'bg-gray-900 border-gray-700' : 'bg-white border-gray-200'
-          }`}>
-            <div className="overflow-x-auto">
-              <table className="w-full">
-                <thead className={`${
-                  theme === 'dark' ? 'bg-gray-800' : 'bg-gray-50'
-                }`}>
-                  <tr>
-                    <th className={`px-6 py-4 text-right text-sm font-medium ${
-                      theme === 'dark' ? 'text-gray-300' : 'text-gray-700'
-                    }`}>
-                      الترتيب
-                    </th>
-                    <th className={`px-6 py-4 text-right text-sm font-medium ${
-                      theme === 'dark' ? 'text-gray-300' : 'text-gray-700'
-                    }`}>
-                      اسم الصنف
-                    </th>
-                    <th className={`px-6 py-4 text-right text-sm font-medium ${
-                      theme === 'dark' ? 'text-gray-300' : 'text-gray-700'
-                    }`}>
-                      القسم
-                    </th>
-                    <th className={`px-6 py-4 text-right text-sm font-medium ${
-                      theme === 'dark' ? 'text-gray-300' : 'text-gray-700'
-                    }`}>
-                      الكمية المباعة
-                    </th>
-                    <th className={`px-6 py-4 text-right text-sm font-medium ${
-                      theme === 'dark' ? 'text-gray-300' : 'text-gray-700'
-                    }`}>
-                      إجمالي المبيعات
-                    </th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-gray-200">
-                  {topSelling.map((item, index) => (
-                    <tr key={item.inventoryId} className="hover:bg-gray-50 dark:hover:bg-gray-800">
-                      <td className={`px-6 py-4 text-sm ${
-                        theme === 'dark' ? 'text-gray-300' : 'text-gray-900'
-                      }`}>
-                        <span className={`inline-flex items-center justify-center w-8 h-8 rounded-full text-sm font-medium ${
-                          index === 0 ? 'bg-yellow-100 text-yellow-800' :
-                          index === 1 ? 'bg-gray-100 text-gray-800' :
-                          index === 2 ? 'bg-orange-100 text-orange-800' :
-                          'bg-gray-100 text-gray-600'
-                        }`}>
-                          {index + 1}
-                        </span>
-                      </td>
-                      <td className={`px-6 py-4 text-sm ${
-                        theme === 'dark' ? 'text-gray-300' : 'text-gray-900'
-                      }`}>
-                        {item.item_name ? (item.color_number ? `${item.item_name} ${item.color_number}` : item.item_name) : 'غير محدد'}
-                      </td>
-                      <td className={`px-6 py-4 text-sm ${
-                        theme === 'dark' ? 'text-gray-300' : 'text-gray-900'
-                      }`}>
-                        {item.section_name || 'عام'}
-                      </td>
-                      <td className={`px-6 py-4 text-sm ${
-                        theme === 'dark' ? 'text-gray-300' : 'text-gray-900'
-                      }`}>
-                        {formatNumber(item.qty)}
-                      </td>
-                      <td className={`px-6 py-4 text-sm font-medium ${
-                        theme === 'dark' ? 'text-green-400' : 'text-green-600'
-                      }`}>
-                        {formatNumber(item.total)} ج.م
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+      {/* Top Selling Items - grouped by section */}
+      {topSelling && topSelling.length > 0 && (() => {
+        const searchQuery = (topSellingSearch || '').trim().toLowerCase()
+
+        // Group by section_name
+        const sectionMap = {}
+        topSelling.forEach((item) => {
+          const sec = (item.section_name || '').trim()
+          if (!sec) return
+          if (!sectionMap[sec]) sectionMap[sec] = []
+          sectionMap[sec].push(item)
+        })
+
+        let sectionEntries = Object.entries(sectionMap).map(([sectionName, items]) => {
+          if (!searchQuery) return [sectionName, items]
+
+          const sectionMatches = sectionName.toLowerCase().includes(searchQuery)
+          const filteredItems = items.filter((item) => {
+            const itemLabel = `${item.item_name || ''} ${item.color_number || ''}`.trim().toLowerCase()
+            return itemLabel.includes(searchQuery)
+          })
+
+          if (sectionMatches) return [sectionName, items]
+          if (filteredItems.length > 0) return [sectionName, filteredItems]
+          return null
+        }).filter(Boolean)
+
+        if (!sectionEntries.length && !searchQuery) return null
+
+        return (
+          <>
+            <div className="mb-6">
+              <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-2">
+                <div className="flex items-center gap-3">
+                  <div className={`p-2 rounded-lg ${
+                    theme === 'dark' ? 'bg-camel/20 text-camel' : 'bg-brown/20 text-brown'
+                  }`}>
+                    <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6" />
+                    </svg>
+                  </div>
+                  <h2 className={`text-2xl font-bold ${
+                    theme === 'dark' ? 'text-camel' : 'text-brown'
+                  }`}>
+                    أكثر الأصناف مبيعاً
+                  </h2>
+                </div>
+                <div className="relative w-full sm:w-72">
+                  <svg
+                    className={`absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 ${
+                      theme === 'dark' ? 'text-gray-400' : 'text-gray-500'
+                    }`}
+                    fill="none"
+                    stroke="currentColor"
+                    viewBox="0 0 24 24"
+                  >
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-4.35-4.35M11 18a7 7 0 100-14 7 7 0 000 14z" />
+                  </svg>
+                  <input
+                    type="text"
+                    value={topSellingSearch}
+                    onChange={(e) => setTopSellingSearch(e.target.value)}
+                    placeholder="بحث عن قسم أو صنف..."
+                    className={`w-full pr-10 pl-3 py-2 rounded-lg border text-sm outline-none transition ${
+                      theme === 'dark'
+                        ? 'bg-gray-800 border-gray-700 text-gray-100 placeholder-gray-500 focus:border-camel'
+                        : 'bg-white border-gray-300 text-gray-900 placeholder-gray-400 focus:border-brown'
+                    }`}
+                  />
+                </div>
+              </div>
+              <p className={`text-sm ${
+                theme === 'dark' ? 'text-gray-400' : 'text-gray-600'
+              }`}>
+                الأصناف الأكثر طلباً من العملاء — مقسّمة حسب الأقسام (صافي بعد المرتجعات)
+              </p>
             </div>
-          </div>
-        </>
-      )}
+
+            {sectionEntries.length === 0 ? (
+              <div className={`rounded-xl border-2 px-5 py-8 text-center ${
+                theme === 'dark' ? 'bg-gray-900 border-gray-700 text-gray-400' : 'bg-white border-gray-200 text-gray-500'
+              }`}>
+                لا توجد نتائج مطابقة للبحث
+              </div>
+            ) : (
+            <div className="space-y-3">
+              {sectionEntries.map(([sectionName, items]) => {
+                const isOpen = expandedSections[sectionName] ?? false
+                const sectionTotal = items.reduce((s, i) => s + (i.total || 0), 0)
+                const sectionQty = items.reduce((s, i) => s + (i.qty || 0), 0)
+
+                return (
+                  <div
+                    key={sectionName}
+                    className={`rounded-xl border-2 overflow-hidden transition-all ${
+                      theme === 'dark' ? 'bg-gray-900 border-gray-700' : 'bg-white border-gray-200'
+                    }`}
+                  >
+                    {/* Section header / dropdown trigger */}
+                    <button
+                      type="button"
+                      onClick={() => toggleSection(sectionName)}
+                      className={`w-full flex items-center justify-between px-5 py-4 transition-colors ${
+                        theme === 'dark'
+                          ? 'bg-gray-800 hover:bg-gray-750 text-gray-100'
+                          : 'bg-gray-50 hover:bg-gray-100 text-gray-800'
+                      }`}
+                    >
+                      <div className="flex items-center gap-3">
+                        {/* Chevron */}
+                        <svg
+                          className={`w-5 h-5 transition-transform duration-200 ${isOpen ? 'rotate-180' : 'rotate-0'} ${
+                            theme === 'dark' ? 'text-camel' : 'text-brown'
+                          }`}
+                          fill="none"
+                          stroke="currentColor"
+                          viewBox="0 0 24 24"
+                        >
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                        </svg>
+                        <span className={`text-xs font-medium ${theme === 'dark' ? 'text-gray-400' : 'text-gray-500'}`}>
+                          {items.length} صنف
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-4">
+                        <div className="text-left">
+                          <span className={`text-xs ${theme === 'dark' ? 'text-gray-400' : 'text-gray-500'}`}>
+                            إجمالي: <span className={`font-semibold ${theme === 'dark' ? 'text-green-400' : 'text-green-600'}`}>{formatNumber(sectionTotal)} ج.م</span>
+                            &nbsp;•&nbsp;
+                            كمية: <span className={`font-semibold ${theme === 'dark' ? 'text-blue-400' : 'text-blue-600'}`}>{formatNumber(sectionQty)}</span>
+                          </span>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <div className={`p-2 rounded-lg ${theme === 'dark' ? 'bg-camel/20 text-camel' : 'bg-brown/20 text-brown'}`}>
+                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4" />
+                            </svg>
+                          </div>
+                          <span className={`font-bold text-lg ${theme === 'dark' ? 'text-camel' : 'text-brown'}`}>
+                            {sectionName}
+                          </span>
+                          <span
+                            role="button"
+                            tabIndex={0}
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              requestDeleteTopSellingSection(sectionName)
+                            }}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter' || e.key === ' ') {
+                                e.preventDefault()
+                                e.stopPropagation()
+                                requestDeleteTopSellingSection(sectionName)
+                              }
+                            }}
+                            className={`p-2 rounded-lg transition-colors ${
+                              theme === 'dark'
+                                ? 'text-red-300 hover:text-red-200 hover:bg-red-900/30'
+                                : 'text-red-600 hover:text-red-700 hover:bg-red-50'
+                            }`}
+                            title={`حذف قسم ${sectionName} من الأكثر مبيعاً`}
+                          >
+                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6M9 7V4a1 1 0 011-1h4a1 1 0 011 1v3M4 7h16" />
+                            </svg>
+                          </span>
+                        </div>
+                      </div>
+                    </button>
+
+                    {/* Items table - collapsible */}
+                    {isOpen && (
+                      <div className="overflow-x-auto">
+                        <table className="w-full">
+                          <thead className={`${theme === 'dark' ? 'bg-gray-800' : 'bg-gray-50'}`}>
+                            <tr>
+                              <th className={`px-5 py-3 text-right text-xs font-semibold ${theme === 'dark' ? 'text-gray-400' : 'text-gray-600'}`}>الترتيب</th>
+                              <th className={`px-5 py-3 text-right text-xs font-semibold ${theme === 'dark' ? 'text-gray-400' : 'text-gray-600'}`}>اسم الصنف</th>
+                              <th className={`px-5 py-3 text-right text-xs font-semibold ${theme === 'dark' ? 'text-gray-400' : 'text-gray-600'}`}>الكمية المباعة</th>
+                              <th className={`px-5 py-3 text-right text-xs font-semibold ${theme === 'dark' ? 'text-gray-400' : 'text-gray-600'}`}>إجمالي المبيعات</th>
+                            </tr>
+                          </thead>
+                          <tbody className={`divide-y ${theme === 'dark' ? 'divide-gray-700' : 'divide-gray-100'}`}>
+                            {items.map((item, index) => (
+                              <tr
+                                key={item.inventoryId}
+                                className={`transition-colors ${theme === 'dark' ? 'hover:bg-gray-800' : 'hover:bg-gray-50'}`}
+                              >
+                                <td className={`px-5 py-3 text-sm ${theme === 'dark' ? 'text-gray-300' : 'text-gray-700'}`}>
+                                  <span className={`inline-flex items-center justify-center w-7 h-7 rounded-full text-xs font-bold ${
+                                    index === 0 ? 'bg-yellow-100 text-yellow-800' :
+                                    index === 1 ? 'bg-slate-100 text-slate-700' :
+                                    index === 2 ? 'bg-orange-100 text-orange-700' :
+                                    theme === 'dark' ? 'bg-gray-700 text-gray-400' : 'bg-gray-100 text-gray-500'
+                                  }`}>
+                                    {index + 1}
+                                  </span>
+                                </td>
+                                <td className={`px-5 py-3 text-sm font-medium ${theme === 'dark' ? 'text-gray-200' : 'text-gray-800'}`}>
+                                  {item.item_name
+                                    ? (item.color_number ? `${item.item_name} ${item.color_number}` : item.item_name)
+                                    : 'غير محدد'}
+                                </td>
+                                <td className={`px-5 py-3 text-sm ${theme === 'dark' ? 'text-blue-400' : 'text-blue-600'}`}>
+                                  {formatNumber(item.qty)}
+                                </td>
+                                <td className={`px-5 py-3 text-sm font-semibold ${theme === 'dark' ? 'text-green-400' : 'text-green-600'}`}>
+                                  {formatNumber(item.total)} ج.م
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                  </div>
+                )
+              })}
+            </div>
+            )}
+          </>
+        )
+      })()}
 
       {/* Low Inventory Alert */}
       {stats.lowInventoryItems && stats.lowInventoryItems.length > 0 && (
@@ -1196,6 +1367,28 @@ function Statistics() {
           </div>
         </>
       )}
+
+      <ConfirmDialog
+        open={deleteSectionDialogOpen}
+        title="تأكيد حذف القسم من الأكثر مبيعاً"
+        message={
+          <div className="text-right">
+            <p className="mb-2">
+              هل أنت متأكد من حذف قسم "{pendingDeleteSectionName}" من قائمة الأكثر مبيعاً؟
+            </p>
+            <p className="text-sm text-red-500">
+              سيتم إخفاء هذا القسم من تقرير الأكثر مبيعاً ولن يتم حذف بيانات المبيعات نفسها.
+            </p>
+          </div>
+        }
+        confirmText="حذف من الأكثر مبيعاً"
+        cancelText="إلغاء"
+        onConfirm={handleDeleteTopSellingSection}
+        onCancel={() => {
+          setDeleteSectionDialogOpen(false)
+          setPendingDeleteSectionName('')
+        }}
+      />
     </div>
   )
 }

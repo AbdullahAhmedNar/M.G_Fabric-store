@@ -2,9 +2,10 @@ import { useEffect, useState } from "react";
 import { useTheme } from "../context/ThemeContext";
 import { useNotification } from "../context/NotificationContext";
 import { formatNumber } from "../utils/format";
+import SearchableSelect from "./SearchableSelect";
 
 function CustomerDetails({ customer, onClose }) {
-  const { theme } = useTheme();
+  const { theme, appName } = useTheme();
   const { addNotification } = useNotification();
   const [orders, setOrders] = useState([]);
   const [payments, setPayments] = useState([]);
@@ -14,11 +15,16 @@ function CustomerDetails({ customer, onClose }) {
   const [editingPayment, setEditingPayment] = useState(null);
   const [showOrderModal, setShowOrderModal] = useState(false);
   const [editingOrder, setEditingOrder] = useState(null);
+  const [showTransactionDetailsModal, setShowTransactionDetailsModal] =
+    useState(false);
+  const [selectedTransactionDetails, setSelectedTransactionDetails] =
+    useState(null);
   const [showReturnedOrderModal, setShowReturnedOrderModal] = useState(false);
   const [editingReturnedOrder, setEditingReturnedOrder] = useState(null);
   const [sections, setSections] = useState([]);
   const [inventory, setInventory] = useState([]);
   const [selectedSectionId, setSelectedSectionId] = useState("");
+  const [orderSelectedSectionId, setOrderSelectedSectionId] = useState("");
   const [paymentFormData, setPaymentFormData] = useState({
     amount: "",
     description: "",
@@ -27,9 +33,14 @@ function CustomerDetails({ customer, onClose }) {
   const [orderFormData, setOrderFormData] = useState({
     customer_name: "",
     description: "",
+    from_inventory: false,
+    section_id: "",
+    inventory_item_id: "",
     quantity: "",
+    unit: "متر",
     price: "",
     paid: "",
+    rolls_sold: "",
     date: new Date().toISOString().split("T")[0],
   });
   const [returnedOrderFormData, setReturnedOrderFormData] = useState({
@@ -41,12 +52,17 @@ function CustomerDetails({ customer, onClose }) {
     date: new Date().toISOString().split("T")[0],
     section_id: "",
     inventory_item_id: "",
+    rolls_count: "",
     add_to_inventory: false,
   });
   const [showDeleteDialog, setShowDeleteDialog] = useState(false);
   const [deleteItem, setDeleteItem] = useState(null);
   const [showWhatsAppModal, setShowWhatsAppModal] = useState(false);
   const [whatsappPhone, setWhatsappPhone] = useState("");
+  const [showGroupOrderModal, setShowGroupOrderModal] = useState(false);
+  const [selectedGroupTransaction, setSelectedGroupTransaction] = useState(null);
+  const [editingGroupItemId, setEditingGroupItemId] = useState(null);
+  const [groupItemEditForm, setGroupItemEditForm] = useState({});
 
   useEffect(() => {
     const load = async () => {
@@ -122,7 +138,17 @@ function CustomerDetails({ customer, onClose }) {
       }
     };
     load();
-  }, [customer?.name]);
+  }, [customer?.id, customer?.name]);
+
+  // إغلاق مودال فاتورة متعددة الأصناف إذا لم يتبقَّ أي صنف في المجموعة (بعد حذف الكل)
+  useEffect(() => {
+    if (!showGroupOrderModal || !selectedGroupTransaction?.groupIds?.length) return;
+    const groupOrders = orders.filter((o) => selectedGroupTransaction.groupIds.includes(o.id));
+    if (groupOrders.length === 0) {
+      setShowGroupOrderModal(false);
+      setSelectedGroupTransaction(null);
+    }
+  }, [orders, showGroupOrderModal, selectedGroupTransaction]);
 
   const generatePDF = () => {
     const accountStatus = getAccountStatus();
@@ -162,7 +188,7 @@ function CustomerDetails({ customer, onClose }) {
             <tr>
               <td colspan="7" class="thead-header">
                 <div class="print-title">
-                  <h1>M.G Fabric Store</h1>
+                  <h1>${appName || 'M.G FASHION FABRIC'}</h1>
                   <h2>كشف حساب العميل</h2>
                 </div>
                 <div class="print-info">
@@ -190,7 +216,7 @@ function CustomerDetails({ customer, onClose }) {
                 <td>${t.type === "order" || t.type === "returned_order" ? formatNumber(Math.abs(t.value)) : ""}</td>
                 <td>${t.type === "order" || t.type === "returned_order" ? formatNumber(t.price) : ""}</td>
                 <td>${t.type === "order" || t.type === "returned_order" ? `${t.quantity} ${t.unit || "متر"}` : ""}</td>
-                <td>${t.type === "returned_order" ? `⟲ ${t.description || "أوردر راجع"}` : (t.description || (t.type === "payment" ? "دفعة" : "أوردر"))}</td>
+                <td>${t.type === "returned_order" ? `⟲ ${t.description || "أوردر راجع"}` : (t.isGrouped ? `📋 ${t.description || "أوردر"}` : (t.description || (t.type === "payment" ? "دفعة" : "أوردر")))}</td>
                 <td>${t.date}</td>
               </tr>
             `).join("")}
@@ -207,6 +233,171 @@ function CustomerDetails({ customer, onClose }) {
     setTimeout(() => {
       printWindow.print();
     }, 250);
+  };
+
+  const printGroupInvoice = (transaction, items) => {
+    const totalValue  = items.reduce((s, o) => s + (o.quantity || 0) * (o.price || 0), 0);
+    const totalPaid   = items.reduce((s, o) => s + (parseFloat(o.paid) || 0), 0);
+    const remaining   = Math.max(0, totalValue - totalPaid);
+    const invoiceDate = transaction.date || new Date().toISOString().split("T")[0];
+    const sysName     = appName || "M.G FASHION FABRIC";
+
+    const fmt = (n) => Number(n).toLocaleString("en-US", { minimumFractionDigits: 0, maximumFractionDigits: 2 });
+
+    const itemRows = items.map((o) => `
+      <div class="item">
+        <div class="item-name">${o.description || "صنف"}</div>
+        <div class="item-calc">
+          ${fmt(o.quantity)} ${o.unit || "متر"} × ${fmt(o.price)} ج.م = <strong>${fmt((o.quantity || 0) * (o.price || 0))} ج.م</strong>
+        </div>
+      </div>
+    `).join('<div class="sep-dashed"></div>');
+
+    const html = `<!DOCTYPE html>
+<html dir="rtl" lang="ar">
+<head>
+  <meta charset="UTF-8">
+  <title>فاتورة - ${customer.name}</title>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;900&display=swap');
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      font-family: 'Cairo', Arial, sans-serif;
+      direction: rtl;
+      background: #f5f5f5;
+      display: flex;
+      justify-content: center;
+      padding: 20px 0 40px;
+    }
+
+    .receipt {
+      background: #fff;
+      width: 300px;
+      padding: 20px 18px 24px;
+      box-shadow: 0 2px 12px rgba(0,0,0,0.12);
+    }
+
+    /* ─── Store name ─── */
+    .store-name {
+      text-align: center;
+      font-size: 18px;
+      font-weight: 900;
+      color: #8b5e3c;
+      letter-spacing: 0.5px;
+      margin-bottom: 14px;
+    }
+
+    /* ─── Separators ─── */
+    .sep-solid  { border-top: 1px solid #ccc; margin: 12px 0; }
+    .sep-dashed { border-top: 1px dashed #ccc; margin: 8px 0; }
+
+    /* ─── Invoice meta ─── */
+    .meta { text-align: right; margin-bottom: 4px; }
+    .meta .meta-title { font-size: 14px; font-weight: 700; margin-bottom: 4px; }
+    .meta .meta-row   { font-size: 11px; color: #555; margin: 2px 0; }
+
+    /* ─── Item rows ─── */
+    .item { margin: 4px 0; }
+    .item-name { font-size: 13px; font-weight: 700; text-align: right; }
+    .item-calc { font-size: 11px; color: #555; text-align: right; margin-top: 2px; }
+    .item-calc strong { color: #333; font-weight: 700; }
+
+    /* ─── Totals ─── */
+    .totals { margin: 4px 0; }
+    .total-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      padding: 3px 0;
+    }
+    .total-label { font-size: 13px; color: #444; font-weight: 600; }
+    .total-value { font-size: 22px; font-weight: 900; }
+    .total-value.main  { color: #1a1a1a; }
+    .total-value.paid  { color: #16a34a; }
+    .total-value.rem   { color: #dc2626; }
+    .total-unit { font-size: 13px; font-weight: 600; }
+
+    /* ─── Quran verse ─── */
+    .verse {
+      text-align: center;
+      font-size: 11px;
+      color: #555;
+      line-height: 1.7;
+      margin: 4px 0 2px;
+    }
+    .verse-ref { font-size: 10px; color: #888; }
+
+    /* ─── Footer ─── */
+    .footer { text-align: center; }
+    .footer .welcome { font-size: 14px; font-weight: 700; color: #8b5e3c; margin-bottom: 3px; }
+    .footer .sub     { font-size: 11px; color: #888; }
+
+    @media print {
+      body { background: #fff; padding: 0; }
+      .receipt { box-shadow: none; width: 100%; }
+      body { print-color-adjust: exact; -webkit-print-color-adjust: exact; }
+    }
+  </style>
+</head>
+<body>
+  <div class="receipt">
+
+    <!-- اسم المتجر -->
+    <div class="store-name">${sysName}</div>
+    <div class="sep-solid"></div>
+
+    <!-- بيانات الفاتورة -->
+    <div class="meta">
+      <div class="meta-title">فاتورة بيع</div>
+      <div class="meta-row">التاريخ: ${invoiceDate}</div>
+      <div class="meta-row">العميل: ${customer.name}</div>
+    </div>
+    <div class="sep-dashed"></div>
+
+    <!-- الأصناف -->
+    ${itemRows}
+    <div class="sep-solid"></div>
+
+    <!-- الإجماليات -->
+    <div class="totals">
+      <div class="total-row">
+        <span class="total-label">الإجمالي:</span>
+        <span class="total-value main">${fmt(totalValue)} <span class="total-unit">ج.م</span></span>
+      </div>
+      <div class="total-row">
+        <span class="total-label">المدفوع:</span>
+        <span class="total-value paid">${fmt(totalPaid)} <span class="total-unit">ج.م</span></span>
+      </div>
+      <div class="total-row">
+        <span class="total-label">${remaining > 0 ? "الباقي:" : "مسدد بالكامل"}</span>
+        <span class="total-value rem">${remaining > 0 ? fmt(remaining) + ' <span class="total-unit">ج.م</span>' : "✓"}</span>
+      </div>
+    </div>
+    <div class="sep-solid"></div>
+
+    <!-- آية قرآنية -->
+    <div class="verse">
+      "وَمَن يَتَّقِ اللَّهَ يَجْعَل لَّهُ مَخْرَجًا وَيَرْزُقْهُ مِنْ حَيْثُ لَا يَحْتَسِبُ"
+      <div class="verse-ref">سورة الطلاق - الآية 2-3</div>
+    </div>
+    <div class="sep-dashed"></div>
+
+    <!-- تذييل -->
+    <div class="footer">
+      <div class="welcome">أهلاً وسهلاً بك</div>
+      <div class="sub">نتمنى لكم تجربة تسوق ممتعة</div>
+    </div>
+
+  </div>
+</body>
+</html>`;
+
+    const win = window.open("", "_blank");
+    win.document.write(html);
+    win.document.close();
+    win.focus();
+    setTimeout(() => win.print(), 400);
   };
 
   const generatePDFForWhatsApp = () => {
@@ -366,8 +557,10 @@ function CustomerDetails({ customer, onClose }) {
     setShowDeleteDialog(true);
   };
 
-  const handleDeleteOrder = (orderId) => {
-    setDeleteItem({ type: "order", id: orderId });
+  const handleDeleteOrder = (orderOrId) => {
+    const id = typeof orderOrId === "object" ? orderOrId?.id : orderOrId;
+    const groupIds = typeof orderOrId === "object" ? orderOrId?.groupIds : undefined;
+    setDeleteItem({ type: "order", id, groupIds });
     setShowDeleteDialog(true);
   };
 
@@ -375,18 +568,24 @@ function CustomerDetails({ customer, onClose }) {
     if (!deleteItem) return;
 
     try {
-      const url =
-        deleteItem.type === "payment"
-          ? `http://localhost:3456/api/payments/${deleteItem.id}`
-          : deleteItem.type === "returned_order"
-          ? `http://localhost:3456/api/returned-orders/${deleteItem.id}`
-          : `http://localhost:3456/api/sales/${deleteItem.id}`;
+      const idsToDelete =
+        deleteItem.type === "order" && deleteItem.groupIds?.length
+          ? deleteItem.groupIds
+          : [deleteItem.id];
 
-      const response = await fetch(url, {
-        method: "DELETE",
-      });
+      let allOk = true;
+      for (const id of idsToDelete) {
+        const url =
+          deleteItem.type === "payment"
+            ? `http://localhost:3456/api/payments/${id}`
+            : deleteItem.type === "returned_order"
+            ? `http://localhost:3456/api/returned-orders/${id}`
+            : `http://localhost:3456/api/sales/${id}`;
+        const response = await fetch(url, { method: "DELETE" });
+        if (!response.ok) allOk = false;
+      }
 
-      if (response.ok) {
+      if (allOk) {
         addNotification(
           `تم حذف ${
             deleteItem.type === "payment" 
@@ -483,21 +682,42 @@ function CustomerDetails({ customer, onClose }) {
       setOrderFormData({
         customer_name: order.customer_name || customer.name,
         description: order.description || "",
+        from_inventory: !!order.inventory_item_id,
+        section_id: order.section_id || "",
+        inventory_item_id: order.inventory_item_id || "",
         quantity: order.quantity || "",
+        unit: order.unit || "متر",
         price: order.price || "",
         paid: order.paid || "",
+        rolls_sold: order.rolls_sold ?? "",
         date: order.date || new Date().toISOString().split("T")[0],
       });
+      const selectedInventoryItem = order.inventory_item_id
+        ? inventory.find((item) => item.id == order.inventory_item_id)
+        : null;
+      setOrderSelectedSectionId(
+        order.section_id
+          ? String(order.section_id)
+          : selectedInventoryItem?.section_id
+          ? String(selectedInventoryItem.section_id)
+          : ""
+      );
     } else {
       setEditingOrder(null);
       setOrderFormData({
         customer_name: customer.name,
         description: "",
+        from_inventory: false,
+        section_id: "",
+        inventory_item_id: "",
         quantity: "",
+        unit: "متر",
         price: "",
         paid: "",
+        rolls_sold: "",
         date: new Date().toISOString().split("T")[0],
       });
+      setOrderSelectedSectionId("");
     }
     setShowOrderModal(true);
   };
@@ -505,20 +725,76 @@ function CustomerDetails({ customer, onClose }) {
   const closeOrderModal = () => {
     setShowOrderModal(false);
     setEditingOrder(null);
+    setOrderSelectedSectionId("");
   };
 
   const handleOrderSubmit = async (e) => {
     e.preventDefault();
     try {
+      const quantity = parseFloat(orderFormData.quantity) || 0;
+      const price = parseFloat(orderFormData.price) || 0;
+      const paid = parseFloat(orderFormData.paid) || 0;
+      const rollsSoldVal =
+        orderFormData.rolls_sold != null && orderFormData.rolls_sold !== ""
+          ? parseInt(orderFormData.rolls_sold, 10)
+          : null;
+      const inventoryItemId =
+        orderFormData.from_inventory && orderFormData.inventory_item_id
+          ? orderFormData.inventory_item_id
+          : null;
+      const sectionId =
+        orderFormData.from_inventory && orderFormData.section_id
+          ? orderFormData.section_id
+          : null;
+
+      if (orderFormData.from_inventory && inventoryItemId) {
+        const selectedItem = inventory.find((i) => i.id == inventoryItemId);
+        if (
+          orderFormData.rolls_sold === "" ||
+          orderFormData.rolls_sold == null ||
+          Number.isNaN(rollsSoldVal) ||
+          rollsSoldVal <= 0
+        ) {
+          addNotification("عدد الأتواب مطلوب ولا يمكن تركه فارغًا", "error");
+          return;
+        }
+        const availableQuantity =
+          (selectedItem?.total_meters || 0) +
+          (editingOrder?.inventory_item_id == inventoryItemId
+            ? parseFloat(editingOrder?.quantity || 0)
+            : 0);
+        if (!selectedItem || quantity > availableQuantity) {
+          addNotification(
+            `الكمية غير متوفرة في المخزون. المتاح: ${formatNumber(
+              availableQuantity
+            )} ${selectedItem?.unit || "متر"} فقط`,
+            "error"
+          );
+          return;
+        }
+        if (!Number.isNaN(rollsSoldVal) && rollsSoldVal > 0) {
+          const availableRolls =
+            (parseInt(selectedItem?.rolls_count, 10) || 0) +
+            (editingOrder?.inventory_item_id == inventoryItemId
+              ? parseInt(editingOrder?.rolls_sold, 10) || 0
+              : 0);
+          if (rollsSoldVal > availableRolls) {
+            addNotification(
+              `عدد الأتواب (${rollsSoldVal}) أكبر من المتاح (${availableRolls})`,
+              "error"
+            );
+            return;
+          }
+        }
+      }
+
       const url = editingOrder
         ? `http://localhost:3456/api/sales/${editingOrder.id}`
         : "http://localhost:3456/api/sales";
 
       const method = editingOrder ? "PUT" : "POST";
 
-      const total =
-        parseFloat(orderFormData.quantity) * parseFloat(orderFormData.price);
-      const paid = parseFloat(orderFormData.paid) || 0;
+      const total = quantity * price;
       const remaining = total - paid;
 
       const response = await fetch(url, {
@@ -527,12 +803,22 @@ function CustomerDetails({ customer, onClose }) {
         body: JSON.stringify({
           customer_name: orderFormData.customer_name,
           description: orderFormData.description,
-          quantity: parseFloat(orderFormData.quantity),
-          price: parseFloat(orderFormData.price),
+          quantity,
+          unit: orderFormData.unit || "متر",
+          price,
           total: total,
           paid: paid,
           remaining: remaining,
           date: orderFormData.date,
+          inventory_item_id: inventoryItemId,
+          section_id: sectionId,
+          rolls_sold:
+            !Number.isNaN(rollsSoldVal) && rollsSoldVal > 0
+              ? rollsSoldVal
+              : null,
+          ...(editingOrder?.order_group_id
+            ? { order_group_id: editingOrder.order_group_id }
+            : {}),
         }),
       });
 
@@ -544,9 +830,7 @@ function CustomerDetails({ customer, onClose }) {
         closeOrderModal();
         // Reload data
         const ordersRes = await fetch(
-          `http://localhost:3456/api/sales/by-customer?name=${encodeURIComponent(
-            customer.name
-          )}`
+          `http://localhost:3456/api/sales/by-customer?customer_id=${customer.id}`
         );
         const ordersJson = await ordersRes.json();
         if (
@@ -581,6 +865,7 @@ function CustomerDetails({ customer, onClose }) {
       date: new Date().toISOString().split("T")[0],
       section_id: "",
       inventory_item_id: "",
+      rolls_count: "",
       add_to_inventory: false,
     });
     setSelectedSectionId("");
@@ -598,6 +883,7 @@ function CustomerDetails({ customer, onClose }) {
       date: returnedOrder.date || new Date().toISOString().split("T")[0],
       section_id: returnedOrder.section_id || "",
       inventory_item_id: returnedOrder.inventory_item_id || "",
+      rolls_count: returnedOrder.rolls_count ?? "",
       add_to_inventory: !!returnedOrder.inventory_item_id,
     });
     if (returnedOrder.section_id) {
@@ -618,6 +904,7 @@ function CustomerDetails({ customer, onClose }) {
       date: new Date().toISOString().split("T")[0],
       section_id: "",
       inventory_item_id: "",
+      rolls_count: "",
       add_to_inventory: false,
     });
     setSelectedSectionId("");
@@ -628,6 +915,15 @@ function CustomerDetails({ customer, onClose }) {
     try {
       const quantity = parseFloat(returnedOrderFormData.quantity) || 0;
       const price = parseFloat(returnedOrderFormData.price) || 0;
+      const rollsCountRaw = returnedOrderFormData.rolls_count;
+      const parsedRollsCount =
+        rollsCountRaw != null && rollsCountRaw !== ""
+          ? parseInt(rollsCountRaw, 10)
+          : null;
+      const rollsCount =
+        Number.isInteger(parsedRollsCount) && parsedRollsCount >= 0
+          ? parsedRollsCount
+          : null;
 
       const url = editingReturnedOrder
         ? `http://localhost:3456/api/returned-orders/${editingReturnedOrder.id}`
@@ -647,6 +943,7 @@ function CustomerDetails({ customer, onClose }) {
           date: returnedOrderFormData.date,
           section_id: returnedOrderFormData.section_id || null,
           inventory_item_id: returnedOrderFormData.inventory_item_id || null,
+          rolls_count: rollsCount,
           add_to_inventory: returnedOrderFormData.add_to_inventory,
         }),
       });
@@ -699,12 +996,197 @@ function CustomerDetails({ customer, onClose }) {
     setShowDeleteDialog(true);
   };
 
+  const startGroupItemInlineEdit = (order) => {
+    setEditingGroupItemId(order.id);
+    setGroupItemEditForm({
+      description: order.description || "",
+      quantity: order.quantity || "",
+      price: order.price || "",
+      paid: order.paid || "",
+      date: order.date || new Date().toISOString().split("T")[0],
+      order_group_id: order.order_group_id,
+      unit: order.unit || "متر",
+      section_id: order.section_id ?? "",
+      inventory_item_id: order.inventory_item_id ?? "",
+      rolls_sold: order.rolls_sold ?? "",
+      _original_quantity: order.quantity || 0,
+      _original_rolls_sold: order.rolls_sold || 0,
+    });
+  };
+
+  const cancelGroupItemInlineEdit = () => {
+    setEditingGroupItemId(null);
+    setGroupItemEditForm({});
+  };
+
+  const saveGroupItemInlineEdit = async (orderId) => {
+    try {
+      const quantity = parseFloat(groupItemEditForm.quantity) || 0;
+      const price = parseFloat(groupItemEditForm.price) || 0;
+      const total = quantity * price;
+      const paid = parseFloat(groupItemEditForm.paid) || 0;
+      const sectionId =
+        groupItemEditForm.section_id !== "" && groupItemEditForm.section_id != null
+          ? groupItemEditForm.section_id
+          : null;
+      const inventoryItemId =
+        groupItemEditForm.inventory_item_id !== "" &&
+        groupItemEditForm.inventory_item_id != null
+          ? groupItemEditForm.inventory_item_id
+          : null;
+      const rollsSoldVal = groupItemEditForm.rolls_sold != null && groupItemEditForm.rolls_sold !== ""
+        ? parseInt(groupItemEditForm.rolls_sold, 10) : null;
+      if (inventoryItemId && (Number.isNaN(rollsSoldVal) || rollsSoldVal == null || rollsSoldVal <= 0)) {
+        addNotification("عدد الأتواب مطلوب قبل حفظ تعديل الصنف", "error");
+        return;
+      }
+
+      const orderGroupId =
+        groupItemEditForm.order_group_id ||
+        selectedGroupTransaction?.order_group_id ||
+        orders.find((o) => o.id === orderId)?.order_group_id ||
+        null;
+
+      const response = await fetch(
+        `http://localhost:3456/api/sales/${orderId}`,
+        {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            customer_name: customer.name,
+            description: groupItemEditForm.description,
+            quantity,
+            price,
+            total,
+            paid,
+            remaining: total - paid,
+            date: groupItemEditForm.date,
+            order_group_id: orderGroupId,
+            unit: groupItemEditForm.unit || "متر",
+            section_id: sectionId,
+            inventory_item_id: inventoryItemId,
+            rolls_sold: !isNaN(rollsSoldVal) && rollsSoldVal > 0 ? rollsSoldVal : null,
+          }),
+        }
+      );
+
+      if (response.ok) {
+        addNotification("تم تعديل الصنف بنجاح", "success");
+        cancelGroupItemInlineEdit();
+        const ordersRes = await fetch(
+          `http://localhost:3456/api/sales/by-customer?customer_id=${customer.id}`
+        );
+        const ordersJson = await ordersRes.json();
+        if (ordersJson?.success && Array.isArray(ordersJson.rows)) {
+          setOrders(ordersJson.rows);
+          if (selectedGroupTransaction?.groupIds?.length) {
+            const freshOrders = ordersJson.rows;
+            const stillGrouped = freshOrders.filter((o) =>
+              selectedGroupTransaction.groupIds.includes(o.id)
+            );
+            if (stillGrouped.length > 0) {
+              const totalValue = stillGrouped.reduce(
+                (s, o) => s + (o.quantity || 0) * (o.price || 0),
+                0
+              );
+              const totalPaid = stillGrouped.reduce(
+                (s, o) => s + (parseFloat(o.paid) || 0),
+                0
+              );
+              const totalQuantity = stillGrouped.reduce(
+                (s, o) => s + (parseFloat(o.quantity) || 0),
+                0
+              );
+              setSelectedGroupTransaction((prev) => ({
+                ...prev,
+                value: totalValue,
+                paid: totalPaid,
+                quantity: totalQuantity,
+              }));
+            }
+          }
+        }
+        window.dispatchEvent(new CustomEvent("updateStatistics"));
+      } else {
+        const errData = await response.json().catch(() => null);
+        const errMsg = errData?.message || "فشل في تعديل الصنف";
+        addNotification(errMsg, "error");
+      }
+    } catch {
+      addNotification("فشل في تعديل الصنف", "error");
+    }
+  };
+
   // Calculate combined transactions (orders + payments + returned orders)
   const getAllTransactions = () => {
     const allTransactions = [];
 
-    // Add orders
+    // Group orders by order_group_id (فواتير متعددة الأصناف تظهر كصف واحد)
+    const orderGroups = {};
+    const standaloneOrders = [];
     orders.forEach((order) => {
+      const gid = order.order_group_id && String(order.order_group_id).trim();
+      if (gid) {
+        if (!orderGroups[gid]) orderGroups[gid] = [];
+        orderGroups[gid].push(order);
+      } else {
+        standaloneOrders.push(order);
+      }
+    });
+
+    // Add grouped orders as one row per group (قيمة إجمالية + إجمالي الكمية + سعر الوحدة + اسم القسم في البيان)
+    Object.values(orderGroups).forEach((group) => {
+      // لو الفاتورة فيها صنف واحد فقط، تعامل معها كأوردر عادي بدون علامة الفاتورة المتعددة
+      if (group.length === 1) {
+        const order = group[0];
+        allTransactions.push({
+          type: "order",
+          id: order.id,
+          global_sequence: order.global_sequence,
+          date: order.date,
+          description: order.description || "",
+          quantity: order.quantity || 0,
+          unit: order.unit || "متر",
+          price: order.price || 0,
+          value: (order.quantity || 0) * (order.price || 0),
+          paid: order.paid || 0,
+          remaining: 0,
+          inventory_item_id: order.inventory_item_id ?? null,
+          outsideInventory: !(order.inventory_item_id != null && order.inventory_item_id !== ""),
+        });
+        return;
+      }
+
+      const first = group[0];
+      const totalValue = group.reduce((s, o) => s + ((o.quantity || 0) * (o.price || 0)), 0);
+      const totalPaid = group.reduce((s, o) => s + (parseFloat(o.paid) || 0), 0);
+      const totalQuantity = group.reduce((s, o) => s + (parseFloat(o.quantity) || 0), 0);
+      const unitPrice = totalQuantity > 0 ? totalValue / totalQuantity : 0;
+      const sectionId = first.section_id;
+      const sectionName = sectionId && sections.find((s) => s.id == sectionId)?.name;
+      const description = sectionName || first.description || "أوردر";
+      allTransactions.push({
+        type: "order",
+        id: first.id,
+        order_group_id: first.order_group_id,
+        global_sequence: first.global_sequence,
+        date: first.date,
+        description,
+        quantity: totalQuantity,
+        unit: first.unit || "متر",
+        price: unitPrice,
+        value: totalValue,
+        paid: totalPaid,
+        remaining: 0,
+        inventory_item_id: null,
+        outsideInventory: false,
+        isGrouped: true,
+        groupIds: group.map((o) => o.id),
+      });
+    });
+
+    // Add standalone orders
+    standaloneOrders.forEach((order) => {
       allTransactions.push({
         type: "order",
         id: order.id,
@@ -871,6 +1353,22 @@ function CustomerDetails({ customer, onClose }) {
 
   const accountStatus = getAccountStatus();
   const totals = getTotals();
+
+  const groupOrders =
+    showGroupOrderModal && selectedGroupTransaction?.groupIds?.length
+      ? orders.filter((o) =>
+          selectedGroupTransaction.groupIds.includes(o.id)
+        )
+      : [];
+  const dynamicGroupTotal = groupOrders.reduce(
+    (s, o) => s + (o.quantity || 0) * (o.price || 0),
+    0
+  );
+  const dynamicGroupPaid = groupOrders.reduce(
+    (s, o) => s + (parseFloat(o.paid) || 0),
+    0
+  );
+
   const orderCount = getAllTransactions().filter(
     (t) => t.type === "order"
   ).length;
@@ -880,6 +1378,331 @@ function CustomerDetails({ customer, onClose }) {
   const paymentCount = getAllTransactions().filter(
     (t) => t.type === "payment"
   ).length;
+  const transactionsWithBalance = calculateRunningBalance();
+
+  const selectedReturnedInventoryItem = returnedOrderFormData.inventory_item_id
+    ? inventory.find(
+        (item) =>
+          String(item.id) === String(returnedOrderFormData.inventory_item_id)
+      )
+    : null;
+
+  const handleReturnedQuantityChange = (value) => {
+    setReturnedOrderFormData((prev) => ({ ...prev, quantity: value }));
+  };
+
+  const handleReturnedRollsChange = (value) => {
+    setReturnedOrderFormData((prev) => ({ ...prev, rolls_count: value }));
+  };
+
+  const getSectionName = (sectionId) => {
+    const section = sections.find((s) => String(s.id) === String(sectionId));
+    return section?.name || "-";
+  };
+
+  const getInventoryItemName = (inventoryItemId) => {
+    const item = inventory.find((i) => String(i.id) === String(inventoryItemId));
+    if (!item) return "-";
+    return item.color_number
+      ? `رقم ${item.color_number}`
+      : item.item_name || "صنف";
+  };
+
+  const getDetailRowIcon = (label) => {
+    const iconClass = `w-5 h-5 shrink-0 ${theme === "dark" ? "text-camel" : "text-brown"}`;
+    if (label.includes("التاريخ")) {
+      return (
+        <svg className={iconClass} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7V3m8 4V3m-9 8h10m-13 9h16a2 2 0 002-2V7a2 2 0 00-2-2H4a2 2 0 00-2 2v11a2 2 0 002 2z" />
+        </svg>
+      );
+    }
+    if (label.includes("الكمية") || label.includes("عدد الأتواب")) {
+      return (
+        <svg className={iconClass} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10" />
+        </svg>
+      );
+    }
+    if (label.includes("السعر") || label.includes("قيمة") || label.includes("المسدّد")) {
+      return (
+        <svg className={iconClass} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8c-2.5 0-4 1-4 2s1.5 2 4 2 4 1 4 2-1.5 2-4 2m0-10V6m0 12v-2" />
+        </svg>
+      );
+    }
+    if (label.includes("القسم") || label.includes("الصنف")) {
+      return (
+        <svg className={iconClass} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 7h18M5 7l1 11a2 2 0 002 2h8a2 2 0 002-2l1-11M9 7V5a3 3 0 016 0v2" />
+        </svg>
+      );
+    }
+    return (
+      <svg className={iconClass} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6M7 4h8l4 4v12a2 2 0 01-2 2H7a2 2 0 01-2-2V6a2 2 0 012-2z" />
+      </svg>
+    );
+  };
+
+  const openTransactionDetails = (transaction) => {
+    if (transaction.type === "payment") {
+      const payment = payments.find((p) => p.id === transaction.id) || transaction;
+      setSelectedTransactionDetails({
+        type: "payment",
+        title: "تفاصيل الدفعة",
+        printData: {
+          customerName: customer.name,
+          date: payment.date || "-",
+          amount: parseFloat(payment.amount ?? payment.paid ?? 0) || 0,
+          description: payment.description || "دفعة",
+        },
+        rows: [
+          { label: "النوع", value: "دفعة" },
+          { label: "سعر/قيمة الدفعة", value: `${formatNumber(payment.amount ?? payment.paid ?? 0)} ج.م` },
+          { label: "تاريخ الدفع", value: payment.date || "-" },
+          { label: "البيان", value: payment.description || "دفعة" },
+        ],
+      });
+      setShowTransactionDetailsModal(true);
+      return;
+    }
+
+    if (transaction.type === "returned_order") {
+      const returned =
+        returnedOrders.find((r) => r.id === transaction.id) || transaction;
+      setSelectedTransactionDetails({
+        type: "returned_order",
+        title: "تفاصيل الأوردر الراجع",
+        printData: {
+          customerName: customer.name,
+          date: returned.date || "-",
+          description: returned.description || "أوردر راجع",
+          quantity: parseFloat(returned.quantity || 0) || 0,
+          unit: returned.unit || "متر",
+          price: parseFloat(returned.price || 0) || 0,
+          section: returned.section_id ? getSectionName(returned.section_id) : "-",
+          item: returned.inventory_item_id ? getInventoryItemName(returned.inventory_item_id) : "-",
+          rolls: returned.rolls_count != null && returned.rolls_count !== "" ? String(returned.rolls_count) : "-",
+        },
+        rows: [
+          { label: "البيان", value: returned.description || "أوردر راجع" },
+          { label: "القسم", value: returned.section_id ? getSectionName(returned.section_id) : "-" },
+          { label: "الصنف", value: returned.inventory_item_id ? getInventoryItemName(returned.inventory_item_id) : "-" },
+          { label: "الكمية", value: `${formatNumber(returned.quantity || 0)} ${returned.unit || "متر"}` },
+          { label: "السعر", value: `${formatNumber(returned.price || 0)} ج.م` },
+          { label: "عدد الأتواب", value: returned.rolls_count != null && returned.rolls_count !== "" ? String(returned.rolls_count) : "-" },
+          { label: "التاريخ", value: returned.date || "-" },
+        ],
+      });
+      setShowTransactionDetailsModal(true);
+      return;
+    }
+
+    if (transaction.isGrouped && transaction.groupIds?.length) {
+      const groupRows = orders.filter((o) =>
+        transaction.groupIds.includes(o.id)
+      );
+      const normalizedItems = groupRows.map((o, index) => {
+        const quantity = parseFloat(o.quantity) || 0;
+        const price = parseFloat(o.price) || 0;
+        const paid = parseFloat(o.paid) || 0;
+        const total = quantity * price;
+        return {
+          idx: index + 1,
+          description: o.description || "صنف",
+          section: o.section_id ? getSectionName(o.section_id) : "-",
+          item: o.inventory_item_id ? getInventoryItemName(o.inventory_item_id) : "-",
+          quantity,
+          unit: o.unit || "متر",
+          price,
+          total,
+          paid,
+          remaining: total - paid,
+          rolls: o.rolls_sold != null && o.rolls_sold !== "" ? String(o.rolls_sold) : "-",
+        };
+      });
+      const summary = normalizedItems.reduce(
+        (acc, item) => ({
+          itemsCount: acc.itemsCount + 1,
+          total: acc.total + item.total,
+          paid: acc.paid + item.paid,
+          remaining: acc.remaining + item.remaining,
+        }),
+        { itemsCount: 0, total: 0, paid: 0, remaining: 0 }
+      );
+      setSelectedTransactionDetails({
+        type: "group_order",
+        title: "تفاصيل الأوردر",
+        summary: {
+          ...summary,
+          date: transaction.date || "-",
+        },
+        items: normalizedItems,
+        printData: {
+          customerName: customer.name,
+          date: transaction.date || "-",
+        },
+        rows: [
+          { label: "عدد الأصناف", value: String(summary.itemsCount) },
+          { label: "التاريخ", value: transaction.date || "-" },
+        ],
+      });
+      setShowTransactionDetailsModal(true);
+      return;
+    }
+
+    const order = orders.find((o) => o.id === transaction.id) || transaction;
+    setSelectedTransactionDetails({
+      type: "order",
+      title: "تفاصيل الأوردر",
+      printData: {
+        customerName: customer.name,
+        date: order.date || "-",
+        description: order.description || "أوردر",
+        quantity: parseFloat(order.quantity || 0) || 0,
+        unit: order.unit || "متر",
+        price: parseFloat(order.price || 0) || 0,
+        paid: parseFloat(order.paid || 0) || 0,
+        section: order.section_id ? getSectionName(order.section_id) : "-",
+        item: order.inventory_item_id ? getInventoryItemName(order.inventory_item_id) : "-",
+        rolls: order.rolls_sold != null && order.rolls_sold !== "" ? String(order.rolls_sold) : "-",
+      },
+      rows: [
+        { label: "البيان", value: order.description || "أوردر" },
+        { label: "القسم", value: order.section_id ? getSectionName(order.section_id) : "-" },
+        { label: "الصنف", value: order.inventory_item_id ? getInventoryItemName(order.inventory_item_id) : "-" },
+        { label: "الكمية", value: `${formatNumber(order.quantity || 0)} ${order.unit || "متر"}` },
+        { label: "السعر", value: `${formatNumber(order.price || 0)} ج.م` },
+        { label: "المسدّد", value: `${formatNumber(order.paid || 0)} ج.م` },
+        { label: "عدد الأتواب", value: order.rolls_sold != null && order.rolls_sold !== "" ? String(order.rolls_sold) : "-" },
+        { label: "التاريخ", value: order.date || "-" },
+      ],
+    });
+    setShowTransactionDetailsModal(true);
+  };
+
+  const handlePrintTransactionPdf = () => {
+    if (!selectedTransactionDetails) return;
+
+    const escapeHtml = (value) =>
+      String(value ?? "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#39;");
+
+    const storeName = appName || "M.G FASHION FABRIC";
+    const details = selectedTransactionDetails;
+    const printData = details.printData || {};
+
+    let title = "تفاصيل العملية";
+    let bodyHtml = "";
+    let total = 0;
+    let paid = 0;
+    let remaining = 0;
+
+    if (details.type === "payment") {
+      title = "إيصال دفعة";
+      total = parseFloat(printData.amount || 0);
+      paid = total;
+      remaining = 0;
+      bodyHtml = `
+        <div class="item-name">${escapeHtml(printData.description || "دفعة")}</div>
+        <div class="item-line">المبلغ: ${escapeHtml(formatNumber(total))} ج.م</div>
+      `;
+    } else if (details.type === "group_order" && Array.isArray(details.items)) {
+      title = "فاتورة بيع";
+      total = parseFloat(details.summary?.total || 0);
+      paid = parseFloat(details.summary?.paid || 0);
+      remaining = total - paid;
+      bodyHtml = details.items
+        .map(
+          (item) => `
+            <div class="item-name">صنف ${escapeHtml(item.idx)}: ${escapeHtml(item.description)}</div>
+            <div class="item-line">${escapeHtml(formatNumber(item.quantity))} ${escapeHtml(item.unit)} × ${escapeHtml(formatNumber(item.price))} ج.م = ${escapeHtml(formatNumber(item.total))} ج.م</div>
+            <div class="item-line">القسم: ${escapeHtml(item.section)} | الصنف: ${escapeHtml(item.item)} | الأتواب: ${escapeHtml(item.rolls)}</div>
+            <div class="sep dashed"></div>
+          `
+        )
+        .join("");
+    } else {
+      const quantity = parseFloat(printData.quantity || 0);
+      const price = parseFloat(printData.price || 0);
+      total = quantity * price;
+      paid = parseFloat(printData.paid || 0);
+      remaining = total - paid;
+      title = details.type === "returned_order" ? "فاتورة أوردر راجع" : "فاتورة بيع";
+      bodyHtml = `
+        <div class="item-name">${escapeHtml(printData.description || "صنف")}</div>
+        <div class="item-line">${escapeHtml(formatNumber(quantity))} ${escapeHtml(printData.unit || "متر")} × ${escapeHtml(formatNumber(price))} ج.م = ${escapeHtml(formatNumber(total))} ج.م</div>
+        <div class="item-line">القسم: ${escapeHtml(printData.section || "-")}</div>
+        <div class="item-line">الصنف: ${escapeHtml(printData.item || "-")}</div>
+        <div class="item-line">عدد الأتواب: ${escapeHtml(printData.rolls || "-")}</div>
+      `;
+    }
+
+    const html = `
+      <!DOCTYPE html>
+      <html dir="rtl" lang="ar">
+      <head>
+        <meta charset="UTF-8" />
+        <title>${escapeHtml(title)}</title>
+        <style>
+          * { margin: 0; padding: 0; box-sizing: border-box; }
+          body { font-family: Arial, sans-serif; direction: rtl; background: #f5f5f5; display: flex; justify-content: center; padding: 20px 0; }
+          .receipt { background: #fff; width: 300px; box-shadow: 0 2px 12px rgba(0,0,0,0.12); padding: 16px; }
+          .store-name { text-align: center; font-size: 18px; font-weight: 800; color: #8b5e3c; margin-bottom: 12px; }
+          .sep { border-top: 1px solid #d1d5db; margin: 10px 0; }
+          .sep.dashed { border-top-style: dashed; margin: 8px 0; }
+          .meta { text-align: right; }
+          .meta p { font-size: 12px; color: #4b5563; margin: 2px 0; }
+          .title { font-size: 14px; font-weight: 700; color: #111827; margin-bottom: 4px; }
+          .item-name { font-size: 13px; font-weight: 700; color: #111827; margin-bottom: 4px; }
+          .item-line { font-size: 12px; color: #4b5563; margin-bottom: 3px; }
+          .row { display: flex; justify-content: space-between; font-size: 13px; margin: 4px 0; }
+          .row .paid { color: #16a34a; font-weight: 700; }
+          .row .remain-pos { color: #dc2626; font-weight: 700; }
+          .row .remain-neg { color: #2563eb; font-weight: 700; }
+          .thanks { text-align: center; margin-top: 12px; }
+          .thanks p:first-child { color: #8b5e3c; font-weight: 700; font-size: 13px; }
+          .thanks p:last-child { color: #6b7280; font-size: 11px; margin-top: 2px; }
+          @media print { body { background: #fff; padding: 0; } .receipt { box-shadow: none; width: 300px; } }
+        </style>
+      </head>
+      <body>
+        <div class="receipt">
+          <div class="store-name">${escapeHtml(storeName)}</div>
+          <div class="sep"></div>
+          <div class="meta">
+            <div class="title">${escapeHtml(title)}</div>
+            <p>التاريخ: ${escapeHtml(printData.date || "-")}</p>
+            <p>العميل: ${escapeHtml(printData.customerName || customer.name || "-")}</p>
+          </div>
+          <div class="sep"></div>
+          ${bodyHtml}
+          <div class="sep"></div>
+          <div class="row"><span>الإجمالي:</span><span>${escapeHtml(formatNumber(total))} ج.م</span></div>
+          <div class="row"><span>المدفوع:</span><span class="paid">${escapeHtml(formatNumber(paid))} ج.م</span></div>
+          <div class="row"><span>${remaining < 0 ? "له مبلغ:" : "الباقي:"}</span><span class="${remaining < 0 ? "remain-neg" : "remain-pos"}">${escapeHtml(formatNumber(Math.abs(remaining)))} ج.م</span></div>
+          <div class="sep"></div>
+          <div class="thanks"><p>أهلاً وسهلاً بك</p><p>نتمنى لكم تجربة تسوق ممتعة</p></div>
+        </div>
+      </body>
+      </html>
+    `;
+
+    const printWindow = window.open("", "_blank");
+    if (!printWindow) {
+      addNotification("تعذر فتح نافذة الطباعة", "error");
+      return;
+    }
+    printWindow.document.write(html);
+    printWindow.document.close();
+    printWindow.focus();
+    setTimeout(() => printWindow.print(), 250);
+  };
 
   return (
     <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
@@ -1015,6 +1838,18 @@ function CustomerDetails({ customer, onClose }) {
                         }`}
                       >
                         أوردرات خارج المخزون
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      <svg className="w-4 h-4 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24" title="أوردر متعدد الأصناف">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01" />
+                      </svg>
+                      <span
+                        className={`text-xs font-medium ${
+                          theme === "dark" ? "text-gray-300" : "text-gray-700"
+                        }`}
+                      >
+                        أوردر متعدد الأصناف
                       </span>
                     </div>
                   </div>
@@ -1225,7 +2060,7 @@ function CustomerDetails({ customer, onClose }) {
           </div>
 
           {/* Transactions Table */}
-          {calculateRunningBalance().length > 0 ? (
+          {transactionsWithBalance.length > 0 ? (
             <div className="overflow-x-auto">
               <table
                 className={`w-full border ${
@@ -1309,19 +2144,22 @@ function CustomerDetails({ customer, onClose }) {
                   </tr>
                 </thead>
                 <tbody>
-                  {calculateRunningBalance().map((transaction, index) => (
+                  {transactionsWithBalance.map((transaction, index) => (
                     <tr 
                       key={`${transaction.type}-${transaction.id || index}`}
-                      className={
-                        transaction.type === "returned_order" || transaction.type === "payment"
-                          ? "border-2 border-red-500"
+                      className={`${
+                        theme === "dark" ? "hover:bg-gray-800/60" : "hover:bg-amber-50/70"
+                      } ${
+                        transaction.type === "payment"
+                          ? theme === "dark"
+                            ? "bg-emerald-900/20"
+                            : "bg-emerald-50/60"
+                          : transaction.type === "returned_order"
+                          ? theme === "dark"
+                            ? "bg-red-900/20"
+                            : "bg-red-50/60"
                           : ""
-                      }
-                      style={
-                        transaction.type === "returned_order" || transaction.type === "payment"
-                          ? { boxShadow: "inset 0 0 0 2px #ef4444" }
-                          : {}
-                      }
+                      }`}
                     >
                       <td
                         className={`px-3 py-2 text-center border ${
@@ -1337,9 +2175,9 @@ function CustomerDetails({ customer, onClose }) {
                       <td
                         className={`px-3 py-2 text-center border ${
                           theme === "dark"
-                            ? "border-gray-800"
-                            : "border-gray-300"
-                        } text-black`}
+                            ? "border-gray-800 text-amber-300"
+                            : "border-gray-300 text-brown"
+                        }`}
                       >
                         {formatNumber(Math.abs(transaction.runningBalance))}
                       </td>
@@ -1394,20 +2232,61 @@ function CustomerDetails({ customer, onClose }) {
                           theme === "dark"
                             ? "border-gray-800"
                             : "border-gray-300"
-                        } max-w-32 overflow-x-auto whitespace-nowrap`}
+                        } max-w-[260px]`}
                       >
                         <div className="min-w-0 flex items-center gap-2">
+                          <span
+                            className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                              transaction.type === "payment"
+                                ? "bg-emerald-100 text-emerald-700"
+                                : transaction.type === "returned_order"
+                                ? "bg-red-100 text-red-700"
+                                : transaction.isGrouped
+                                ? "bg-blue-100 text-blue-700"
+                                : "bg-amber-100 text-amber-700"
+                            }`}
+                          >
+                            {transaction.type === "payment"
+                              ? "دفعة"
+                              : transaction.type === "returned_order"
+                              ? "مرتجع"
+                              : transaction.isGrouped
+                              ? "أوردر"
+                              : "أوردر"}
+                          </span>
                           {transaction.type === "returned_order" && (
                             <span className="text-red-500 font-bold" title="أوردر راجع">
                               ⟲
                             </span>
                           )}
-                          {transaction.description ||
-                            (transaction.type === "payment" 
-                              ? "دفعة" 
-                              : transaction.type === "returned_order" 
-                              ? "أوردر راجع" 
-                              : "أوردر")}
+                          {transaction.isGrouped && transaction.type === "order" && (
+                            <span
+                              className="p-1 rounded text-blue-600 cursor-default flex-shrink-0"
+                              title="أوردر متعدد الأصناف"
+                            >
+                              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01" />
+                              </svg>
+                            </span>
+                          )}
+                          <span
+                            className="min-w-0 block truncate"
+                            title={
+                              transaction.description ||
+                              (transaction.type === "payment"
+                                ? "دفعة"
+                                : transaction.type === "returned_order"
+                                ? "أوردر راجع"
+                                : "أوردر")
+                            }
+                          >
+                            {transaction.description ||
+                              (transaction.type === "payment"
+                                ? "دفعة"
+                                : transaction.type === "returned_order"
+                                ? "أوردر راجع"
+                                : "أوردر")}
+                          </span>
                         </div>
                       </td>
                       <td
@@ -1427,6 +2306,17 @@ function CustomerDetails({ customer, onClose }) {
                         }`}
                       >
                         <div className="flex items-center gap-1">
+                          {/* زر رؤية التفاصيل لجميع الأنواع */}
+                          <button
+                            onClick={() => openTransactionDetails(transaction)}
+                            className="p-2 rounded text-emerald-500 hover:text-emerald-600"
+                            title="رؤية التفاصيل"
+                          >
+                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+                            </svg>
+                          </button>
                           {transaction.type === "payment" ? (
                             <>
                               <button
@@ -1524,9 +2414,17 @@ function CustomerDetails({ customer, onClose }) {
                                 </span>
                               )}
                               <button
-                                onClick={() => openOrderModal(transaction)}
+                                onClick={() => {
+                                  if (transaction.isGrouped && transaction.groupIds?.length) {
+                                    setSelectedGroupTransaction(transaction);
+                                    setShowGroupOrderModal(true);
+                                  } else {
+                                    const o = orders.find((o) => o.id === transaction.id);
+                                    if (o) openOrderModal(o);
+                                  }
+                                }}
                                 className="p-2 rounded text-blue-500 hover:text-blue-600"
-                                title="تعديل الأوردر"
+                                title={transaction.isGrouped ? "تعديل أصناف الأوردر" : "تعديل الأوردر"}
                               >
                                 <svg
                                   className="w-4 h-4"
@@ -1543,7 +2441,7 @@ function CustomerDetails({ customer, onClose }) {
                                 </svg>
                               </button>
                               <button
-                                onClick={() => handleDeleteOrder(transaction.id)}
+                                onClick={() => handleDeleteOrder(transaction)}
                                 className="p-2 rounded text-red-500 hover:text-red-600"
                                 title="حذف الأوردر"
                               >
@@ -1639,6 +2537,140 @@ function CustomerDetails({ customer, onClose }) {
       </div>
 
       {/* Payment Modal */}
+      {showTransactionDetailsModal && selectedTransactionDetails && (
+        <div
+          className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-[110] p-4"
+          style={{ zIndex: 1100 }}
+        >
+          <div
+            className={`p-6 rounded-2xl w-full max-w-2xl max-h-[90vh] overflow-y-auto shadow-2xl border ${
+              theme === "dark" ? "bg-gray-900 border-gray-700" : "bg-white border-gray-200"
+            }`}
+          >
+            <div className="flex items-center justify-between mb-5 pb-4 border-b border-gray-200 dark:border-gray-700">
+              <div className="flex items-center gap-3">
+                <div className={`p-2 rounded-lg ${theme === "dark" ? "bg-camel/20 text-camel" : "bg-brown/10 text-brown"}`}>
+                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6M7 4h10a2 2 0 012 2v12a2 2 0 01-2 2H7a2 2 0 01-2-2V6a2 2 0 012-2z" />
+                  </svg>
+                </div>
+                <h3
+                  className={`text-xl font-bold ${
+                    theme === "dark" ? "text-camel" : "text-brown"
+                  }`}
+                >
+                  {selectedTransactionDetails.title}
+                </h3>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={handlePrintTransactionPdf}
+                  className={`flex items-center gap-2 px-3 py-2 rounded-lg font-semibold transition ${
+                    theme === "dark"
+                      ? "bg-camel text-black hover:bg-camel/90"
+                      : "bg-brown text-white hover:bg-brown/90"
+                  }`}
+                >
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 9V4h12v5M6 18h12m-9 0v2h6v-2m-9 0H4a2 2 0 01-2-2v-5a2 2 0 012-2h16a2 2 0 012 2v5a2 2 0 01-2 2h-2" />
+                  </svg>
+                  طباعة PDF
+                </button>
+                <button
+                  onClick={() => {
+                    setShowTransactionDetailsModal(false);
+                    setSelectedTransactionDetails(null);
+                  }}
+                  className={`p-2 rounded-lg transition ${
+                    theme === "dark"
+                      ? "bg-gray-700 text-gray-300 hover:bg-gray-600"
+                      : "bg-gray-200 text-gray-700 hover:bg-gray-300"
+                  }`}
+                >
+                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                  </svg>
+                </button>
+              </div>
+            </div>
+
+            {selectedTransactionDetails.type === "group_order" && Array.isArray(selectedTransactionDetails.items) ? (
+              <div className="space-y-4">
+                <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+                  <div className={`p-3 rounded-xl border ${theme === "dark" ? "bg-gray-800 border-gray-700" : "bg-amber-50 border-amber-200"}`}>
+                    <p className="text-xs text-gray-500 mb-1">عدد الأصناف</p>
+                    <p className={`text-xl font-extrabold ${theme === "dark" ? "text-camel" : "text-brown"}`}>{selectedTransactionDetails.summary?.itemsCount || 0}</p>
+                  </div>
+                  <div className={`p-3 rounded-xl border ${theme === "dark" ? "bg-gray-800 border-gray-700" : "bg-gray-50 border-gray-200"}`}>
+                    <p className="text-xs text-gray-500 mb-1">إجمالي الأوردر</p>
+                    <p className={`text-xl font-extrabold ${theme === "dark" ? "text-camel" : "text-brown"}`}>{formatNumber(selectedTransactionDetails.summary?.total || 0)} ج.م</p>
+                  </div>
+                  <div className={`p-3 rounded-xl border ${theme === "dark" ? "bg-gray-800 border-gray-700" : "bg-gray-50 border-gray-200"}`}>
+                    <p className="text-xs text-gray-500 mb-1">إجمالي المسدد</p>
+                    <p className="text-xl font-extrabold text-green-600">{formatNumber(selectedTransactionDetails.summary?.paid || 0)} ج.م</p>
+                  </div>
+                  <div className={`p-3 rounded-xl border ${theme === "dark" ? "bg-gray-800 border-gray-700" : "bg-gray-50 border-gray-200"}`}>
+                    <p className="text-xs text-gray-500 mb-1">التاريخ</p>
+                    <p className={`text-lg font-bold ${theme === "dark" ? "text-gray-100" : "text-gray-900"}`}>{selectedTransactionDetails.summary?.date || "-"}</p>
+                  </div>
+                </div>
+
+                <div className="space-y-3">
+                  {selectedTransactionDetails.items.map((item) => (
+                    <div
+                      key={`group-item-${item.idx}-${item.description}`}
+                      className={`p-4 rounded-xl border ${theme === "dark" ? "bg-gray-800 border-gray-700" : "bg-white border-gray-200"}`}
+                    >
+                      <div className="flex items-center justify-between mb-3">
+                        <p className={`font-bold ${theme === "dark" ? "text-camel" : "text-brown"}`}>صنف {item.idx}: {item.description}</p>
+                        <span className={`text-xs px-2 py-1 rounded-full ${theme === "dark" ? "bg-camel/20 text-camel" : "bg-brown/10 text-brown"}`}>
+                          {item.section}
+                        </span>
+                      </div>
+                      <div className="grid grid-cols-2 md:grid-cols-3 gap-2 text-sm">
+                        <div className={`p-2 rounded ${theme === "dark" ? "bg-gray-700" : "bg-gray-50"}`}>الصنف: <span className="font-semibold">{item.item}</span></div>
+                        <div className={`p-2 rounded ${theme === "dark" ? "bg-gray-700" : "bg-gray-50"}`}>الكمية: <span className="font-semibold">{formatNumber(item.quantity)} {item.unit}</span></div>
+                        <div className={`p-2 rounded ${theme === "dark" ? "bg-gray-700" : "bg-gray-50"}`}>السعر: <span className="font-semibold">{formatNumber(item.price)} ج.م</span></div>
+                        <div className={`p-2 rounded ${theme === "dark" ? "bg-gray-700" : "bg-gray-50"}`}>الإجمالي: <span className="font-semibold">{formatNumber(item.total)} ج.م</span></div>
+                        <div className={`p-2 rounded ${theme === "dark" ? "bg-gray-700" : "bg-gray-50"}`}>المسدد: <span className="font-semibold text-green-600">{formatNumber(item.paid)} ج.م</span></div>
+                        <div className={`p-2 rounded ${theme === "dark" ? "bg-gray-700" : "bg-gray-50"}`}>عدد الأتواب: <span className="font-semibold">{item.rolls}</span></div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                {selectedTransactionDetails.rows.map((row, idx) => (
+                  <div
+                    key={`${row.label}-${idx}`}
+                    className={`p-4 rounded-xl border ${
+                      theme === "dark" ? "bg-gray-800 border-gray-700" : "bg-gray-50 border-gray-200"
+                    }`}
+                  >
+                    <div className="flex items-center gap-2 mb-2">
+                      <span
+                        className={`inline-flex items-center justify-center w-7 h-7 rounded-md ${
+                          theme === "dark" ? "bg-camel/15" : "bg-brown/10"
+                        }`}
+                      >
+                        {getDetailRowIcon(row.label)}
+                      </span>
+                      <p className={`text-xs font-semibold ${theme === "dark" ? "text-camel/90" : "text-brown/80"}`}>
+                        {row.label}
+                      </p>
+                    </div>
+                    <p className={`text-sm font-semibold whitespace-pre-wrap leading-6 ${theme === "dark" ? "text-gray-100" : "text-gray-900"}`}>
+                      {row.value}
+                    </p>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
       {showPaymentModal && (
         <div
           className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-[100] p-4"
@@ -1981,14 +3013,19 @@ function CustomerDetails({ customer, onClose }) {
               {/* Total Value Display */}
               {(orderFormData.quantity && orderFormData.price) && (
                 <div
-                  className={`p-4 rounded-lg text-center ${
-                    theme === "dark" ? "bg-green-900/20 border-2 border-green-500" : "bg-green-50 border-2 border-green-400"
+                  className={`p-4 rounded-xl border ${
+                    theme === "dark" ? "bg-gray-800 border-camel/40" : "bg-amber-50 border-amber-200"
                   }`}
                 >
-                  <div className={`text-sm ${theme === "dark" ? "text-gray-400" : "text-gray-600"}`}>
-                    قيمة الأوردر
+                  <div className="flex items-center justify-center gap-2 mb-1">
+                    <svg className={`w-5 h-5 ${theme === "dark" ? "text-camel" : "text-brown"}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6M7 4h8l4 4v12a2 2 0 01-2 2H7a2 2 0 01-2-2V6a2 2 0 012-2z" />
+                    </svg>
+                    <div className={`text-sm font-semibold ${theme === "dark" ? "text-camel" : "text-brown"}`}>
+                      قيمة الأوردر
+                    </div>
                   </div>
-                  <div className="text-2xl font-bold text-green-500">
+                  <div className={`text-2xl font-extrabold ${theme === "dark" ? "text-camel" : "text-brown"}`}>
                     {formatNumber(
                       (parseFloat(orderFormData.quantity) || 0) *
                         (parseFloat(orderFormData.price) || 0)
@@ -2004,7 +3041,12 @@ function CustomerDetails({ customer, onClose }) {
                     theme === "dark" ? "text-gray-300" : "text-gray-700"
                   }`}
                 >
-                  البيان
+                  <span className="inline-flex items-center gap-1.5">
+                    <svg className={`w-4 h-4 ${theme === "dark" ? "text-camel" : "text-brown"}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6M7 4h8l4 4v12a2 2 0 01-2 2H7a2 2 0 01-2-2V6a2 2 0 012-2z" />
+                    </svg>
+                    البيان
+                  </span>
                 </label>
                 <input
                   type="text"
@@ -2025,6 +3067,133 @@ function CustomerDetails({ customer, onClose }) {
                 />
               </div>
 
+              <div className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  id="orderFromInventory"
+                  checked={!!orderFormData.from_inventory}
+                  onChange={(e) =>
+                    setOrderFormData({
+                      ...orderFormData,
+                      from_inventory: e.target.checked,
+                      section_id: e.target.checked ? orderFormData.section_id : "",
+                      inventory_item_id: e.target.checked
+                        ? orderFormData.inventory_item_id
+                        : "",
+                      rolls_sold: e.target.checked ? orderFormData.rolls_sold : "",
+                    })
+                  }
+                  className="w-4 h-4"
+                />
+                <label
+                  htmlFor="orderFromInventory"
+                  className={`text-sm font-semibold ${
+                    theme === "dark" ? "text-gray-300" : "text-gray-700"
+                  }`}
+                >
+                  <span className="inline-flex items-center gap-1.5">
+                    <svg className={`w-4 h-4 ${theme === "dark" ? "text-camel" : "text-brown"}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10" />
+                    </svg>
+                    من المخزون
+                  </span>
+                </label>
+              </div>
+
+              {orderFormData.from_inventory && (
+                <>
+                  <div>
+                    <label
+                      className={`block text-sm font-semibold mb-1 ${
+                        theme === "dark" ? "text-gray-300" : "text-gray-700"
+                      }`}
+                    >
+                      <span className="inline-flex items-center gap-1.5">
+                        <svg className={`w-4 h-4 ${theme === "dark" ? "text-camel" : "text-brown"}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 7h18M5 7l1 11a2 2 0 002 2h8a2 2 0 002-2l1-11M9 7V5a3 3 0 016 0v2" />
+                        </svg>
+                        القسم
+                      </span>
+                    </label>
+                    <SearchableSelect
+                      options={sections.map((s) => ({ value: s.id, label: s.name }))}
+                      value={orderSelectedSectionId}
+                      onChange={(v) => {
+                        setOrderSelectedSectionId(v);
+                        setOrderFormData({
+                          ...orderFormData,
+                          section_id: v,
+                          inventory_item_id: "",
+                          rolls_sold: "",
+                        });
+                      }}
+                      placeholder="اختر القسم"
+                      searchPlaceholder="بحث عن قسم..."
+                      required={orderFormData.from_inventory}
+                    />
+                  </div>
+
+                  {orderSelectedSectionId && (
+                    <div>
+                      <label
+                        className={`block text-sm font-semibold mb-1 ${
+                          theme === "dark" ? "text-gray-300" : "text-gray-700"
+                        }`}
+                      >
+                        <span className="inline-flex items-center gap-1.5">
+                          <svg className={`w-4 h-4 ${theme === "dark" ? "text-camel" : "text-brown"}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10" />
+                          </svg>
+                          الصنف في المخزون
+                        </span>
+                      </label>
+                      <SearchableSelect
+                        options={inventory
+                          .filter((item) => String(item.section_id) === String(orderSelectedSectionId))
+                          .map((item) => ({
+                            value: item.id,
+                            label: `${item.color_number ? `رقم ${item.color_number}` : item.item_name || "صنف"} - الكمية المتاحة: ${item.total_meters} ${item.unit || "متر"}`,
+                          }))}
+                        value={orderFormData.inventory_item_id || ""}
+                        onChange={(v) => {
+                          const selectedItem = inventory.find(
+                            (item) => String(item.id) === String(v)
+                          );
+                          setOrderFormData({
+                            ...orderFormData,
+                            inventory_item_id: v,
+                            section_id: orderSelectedSectionId,
+                            unit: selectedItem?.unit || orderFormData.unit || "متر",
+                            description:
+                              selectedItem?.item_name ||
+                              selectedItem?.color_number ||
+                              orderFormData.description ||
+                              "",
+                          });
+                        }}
+                        placeholder="اختر الصنف"
+                        searchPlaceholder="بحث عن صنف..."
+                        required={orderFormData.from_inventory}
+                      />
+                      {orderFormData.inventory_item_id && (
+                        <p
+                          className={`mt-1 text-xs ${
+                            theme === "dark" ? "text-gray-400" : "text-gray-600"
+                          }`}
+                        >
+                          عدد الأتواب الحالي بالمخزون:{" "}
+                          {inventory.find(
+                            (item) =>
+                              String(item.id) ===
+                              String(orderFormData.inventory_item_id)
+                          )?.rolls_count ?? 0}
+                        </p>
+                      )}
+                    </div>
+                  )}
+                </>
+              )}
+
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label
@@ -2032,7 +3201,12 @@ function CustomerDetails({ customer, onClose }) {
                       theme === "dark" ? "text-gray-300" : "text-gray-700"
                     }`}
                   >
-                    الكمية
+                    <span className="inline-flex items-center gap-1.5">
+                      <svg className={`w-4 h-4 ${theme === "dark" ? "text-camel" : "text-brown"}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 17v-6a3 3 0 016 0v6M6 21h12" />
+                      </svg>
+                      الكمية
+                    </span>
                   </label>
                   <input
                     type="number"
@@ -2059,7 +3233,12 @@ function CustomerDetails({ customer, onClose }) {
                       theme === "dark" ? "text-gray-300" : "text-gray-700"
                     }`}
                   >
-                    السعر
+                    <span className="inline-flex items-center gap-1.5">
+                      <svg className={`w-4 h-4 ${theme === "dark" ? "text-camel" : "text-brown"}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8c-2.5 0-4 1-4 2s1.5 2 4 2 4 1 4 2-1.5 2-4 2m0-10V6m0 12v-2" />
+                      </svg>
+                      السعر
+                    </span>
                   </label>
                   <input
                     type="number"
@@ -2080,7 +3259,83 @@ function CustomerDetails({ customer, onClose }) {
                     required
                   />
                 </div>
+                <div>
+                  <label
+                    className={`block text-sm font-semibold mb-1 ${
+                      theme === "dark" ? "text-gray-300" : "text-gray-700"
+                    }`}
+                  >
+                    <span className="inline-flex items-center gap-1.5">
+                      <svg className={`w-4 h-4 ${theme === "dark" ? "text-camel" : "text-brown"}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 7h16M4 12h16M4 17h10" />
+                      </svg>
+                      الوحدة
+                    </span>
+                  </label>
+                  <select
+                    value={orderFormData.unit}
+                    onChange={(e) =>
+                      setOrderFormData({
+                        ...orderFormData,
+                        unit: e.target.value,
+                      })
+                    }
+                    disabled={
+                      orderFormData.from_inventory &&
+                      !!orderFormData.inventory_item_id
+                    }
+                    className={`w-full px-3 py-2 rounded ${
+                      theme === "dark"
+                        ? "bg-gray-800 text-white"
+                        : "bg-gray-100 text-gray-900"
+                    } ${
+                      orderFormData.from_inventory &&
+                      !!orderFormData.inventory_item_id
+                        ? "opacity-60 cursor-not-allowed"
+                        : ""
+                    }`}
+                  >
+                    <option value="متر">متر</option>
+                    <option value="كيلو">كيلو</option>
+                  </select>
+                </div>
               </div>
+
+              {orderFormData.from_inventory && orderFormData.inventory_item_id && (
+                <div>
+                  <label
+                    className={`block text-sm font-semibold mb-1 ${
+                      theme === "dark" ? "text-gray-300" : "text-gray-700"
+                    }`}
+                  >
+                    <span className="inline-flex items-center gap-1.5">
+                      <svg className={`w-4 h-4 ${theme === "dark" ? "text-camel" : "text-brown"}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v8m-4-4h8" />
+                      </svg>
+                      عدد الأتواب
+                    </span>
+                  </label>
+                  <input
+                    type="number"
+                    min="1"
+                    step="1"
+                    placeholder="مطلوب"
+                    value={orderFormData.rolls_sold}
+                    onChange={(e) =>
+                      setOrderFormData({
+                        ...orderFormData,
+                        rolls_sold: e.target.value,
+                      })
+                    }
+                    className={`w-full px-3 py-2 rounded ${
+                      theme === "dark"
+                        ? "bg-gray-800 text-white"
+                        : "bg-gray-100 text-gray-900"
+                    }`}
+                    required
+                  />
+                </div>
+              )}
 
               <div>
                 <label
@@ -2088,7 +3343,12 @@ function CustomerDetails({ customer, onClose }) {
                     theme === "dark" ? "text-gray-300" : "text-gray-700"
                   }`}
                 >
-                  السعر الإجمالي
+                  <span className="inline-flex items-center gap-1.5">
+                    <svg className={`w-4 h-4 ${theme === "dark" ? "text-camel" : "text-brown"}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6M7 4h8l4 4v12a2 2 0 01-2 2H7a2 2 0 01-2-2V6a2 2 0 012-2z" />
+                    </svg>
+                    السعر الإجمالي
+                  </span>
                 </label>
                 <div
                   className={`w-full px-3 py-2 rounded ${
@@ -2112,7 +3372,12 @@ function CustomerDetails({ customer, onClose }) {
                     theme === "dark" ? "text-gray-300" : "text-gray-700"
                   }`}
                 >
-                  المبلغ المسدد
+                  <span className="inline-flex items-center gap-1.5">
+                    <svg className={`w-4 h-4 ${theme === "dark" ? "text-camel" : "text-brown"}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 9V7a5 5 0 00-10 0v2m-2 0h14a1 1 0 011 1v9a1 1 0 01-1 1H5a1 1 0 01-1-1v-9a1 1 0 011-1z" />
+                    </svg>
+                    المبلغ المسدد
+                  </span>
                 </label>
                 <input
                   type="number"
@@ -2136,7 +3401,12 @@ function CustomerDetails({ customer, onClose }) {
                     theme === "dark" ? "text-gray-300" : "text-gray-700"
                   }`}
                 >
-                  التاريخ
+                  <span className="inline-flex items-center gap-1.5">
+                    <svg className={`w-4 h-4 ${theme === "dark" ? "text-camel" : "text-brown"}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7V3m8 4V3m-9 8h10m-13 9h16a2 2 0 002-2V7a2 2 0 00-2-2H4a2 2 0 00-2 2v11a2 2 0 002 2z" />
+                    </svg>
+                    التاريخ
+                  </span>
                 </label>
                 <input
                   type="date"
@@ -2173,6 +3443,288 @@ function CustomerDetails({ customer, onClose }) {
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* تعديل فاتورة (أصناف متعددة) - يعرض كل أصناف الفاتورة */}
+      {showGroupOrderModal && selectedGroupTransaction?.groupIds?.length && (
+        <div
+          className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-[100] p-4"
+          style={{ zIndex: 1000 }}
+        >
+          <div
+            className={`rounded-xl max-w-xl w-full max-h-[90vh] overflow-hidden flex flex-col shadow-2xl ${
+              theme === "dark" ? "bg-gray-900" : "bg-white"
+            }`}
+          >
+            {/* Header */}
+            <div className={`p-4 flex items-center justify-between border-b ${theme === "dark" ? "border-gray-700 bg-gray-800" : "border-gray-200 bg-gray-50"}`}>
+              <div className="flex items-center gap-3">
+                <div className={`p-2 rounded-lg ${theme === "dark" ? "bg-camel/20 text-camel" : "bg-brown/20 text-brown"}`}>
+                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01" />
+                  </svg>
+                </div>
+                <div>
+                  <h3 className={`font-bold text-lg ${theme === "dark" ? "text-camel" : "text-brown"}`}>
+                    تفاصيل الفاتورة
+                  </h3>
+                  <p className={`text-sm ${theme === "dark" ? "text-gray-400" : "text-gray-500"}`}>
+                    {customer.name} — {selectedGroupTransaction.date}
+                  </p>
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                {/* Print button */}
+                <button
+                  type="button"
+                  onClick={() => printGroupInvoice(selectedGroupTransaction, groupOrders)}
+                  className={`flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm font-semibold transition ${
+                    theme === "dark"
+                      ? "bg-camel text-black hover:bg-camel/80"
+                      : "bg-brown text-white hover:bg-brown/80"
+                  }`}
+                  title="طباعة الفاتورة"
+                >
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 17h2a2 2 0 002-2v-4a2 2 0 00-2-2H5a2 2 0 00-2 2v4a2 2 0 002 2h2m2 4h6a2 2 0 002-2v-4a2 2 0 00-2-2H9a2 2 0 00-2 2v4a2 2 0 002 2zm8-12V5a2 2 0 00-2-2H9a2 2 0 00-2 2v4h10z" />
+                  </svg>
+                  طباعة
+                </button>
+                {/* Close button */}
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowGroupOrderModal(false);
+                    setSelectedGroupTransaction(null);
+                    cancelGroupItemInlineEdit();
+                  }}
+                  className={`p-2 rounded-lg transition ${theme === "dark" ? "bg-gray-700 text-gray-300 hover:bg-gray-600" : "bg-gray-200 text-gray-700 hover:bg-gray-300"}`}
+                >
+                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                  </svg>
+                </button>
+              </div>
+            </div>
+
+            {/* Summary bar — enlarged */}
+            <div className={`px-5 py-4 border-b ${theme === "dark" ? "border-gray-700 bg-gray-800" : "border-amber-100 bg-amber-50"}`}>
+              <div className="flex items-center justify-around gap-2">
+                <div className="text-center">
+                  <div className={`text-xs font-semibold mb-0.5 ${theme === "dark" ? "text-gray-400" : "text-gray-500"}`}>الإجمالي</div>
+                  <div className={`text-2xl font-black ${theme === "dark" ? "text-amber-400" : "text-amber-700"}`}>
+                    {formatNumber(dynamicGroupTotal)} <span className="text-base font-semibold">ج.م</span>
+                  </div>
+                </div>
+                <div className={`w-px h-12 ${theme === "dark" ? "bg-gray-600" : "bg-amber-200"}`} />
+                <div className="text-center">
+                  <div className={`text-xs font-semibold mb-0.5 ${theme === "dark" ? "text-gray-400" : "text-gray-500"}`}>المسدد</div>
+                  <div className={`text-2xl font-black ${theme === "dark" ? "text-green-400" : "text-green-600"}`}>
+                    {formatNumber(dynamicGroupPaid)} <span className="text-base font-semibold">ج.م</span>
+                  </div>
+                </div>
+                <div className={`w-px h-12 ${theme === "dark" ? "bg-gray-600" : "bg-amber-200"}`} />
+                <div className="text-center">
+                  <div className={`text-xs font-semibold mb-0.5 ${theme === "dark" ? "text-gray-400" : "text-gray-500"}`}>الباقي</div>
+                  <div className={`text-2xl font-black ${dynamicGroupTotal - dynamicGroupPaid > 0 ? "text-red-500" : "text-green-500"}`}>
+                    {formatNumber(Math.max(0, dynamicGroupTotal - dynamicGroupPaid))} <span className="text-base font-semibold">ج.م</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Items list */}
+            <div className="p-4 overflow-y-auto flex-1">
+              <div className={`text-xs font-bold uppercase tracking-widest mb-3 text-right ${theme === "dark" ? "text-gray-500" : "text-gray-400"}`}>
+                الأصناف ({groupOrders.length})
+              </div>
+              <div className="space-y-2">
+                {groupOrders.map((order) => (
+                  <div key={order.id}>
+                    {editingGroupItemId === order.id ? (
+                      /* Inline edit form */
+                      <div className={`rounded-xl border-2 p-4 ${theme === "dark" ? "border-camel/50 bg-gray-800" : "border-brown/40 bg-amber-50"}`}>
+                        <div className="grid grid-cols-2 gap-3 mb-3">
+                          <div>
+                            <label className={`block text-xs font-semibold mb-1 ${theme === "dark" ? "text-gray-400" : "text-gray-600"}`}>القسم</label>
+                            <SearchableSelect
+                              options={sections.map((s) => ({ value: s.id, label: s.name }))}
+                              value={groupItemEditForm.section_id || ""}
+                              onChange={(v) =>
+                                setGroupItemEditForm({
+                                  ...groupItemEditForm,
+                                  section_id: v,
+                                  inventory_item_id: "",
+                                  rolls_sold: "",
+                                })
+                              }
+                              placeholder="اختر القسم"
+                              searchPlaceholder="بحث عن قسم..."
+                              className="py-3 text-base min-h-[48px]"
+                            />
+                          </div>
+                          <div>
+                            <label className={`block text-xs font-semibold mb-1 ${theme === "dark" ? "text-gray-400" : "text-gray-600"}`}>الصنف في المخزون</label>
+                            <SearchableSelect
+                              options={inventory
+                                .filter((item) => String(item.section_id) === String(groupItemEditForm.section_id || ""))
+                                .map((item) => ({
+                                  value: item.id,
+                                  label: `${item.color_number ? `رقم ${item.color_number}` : item.item_name || "صنف"} - الكمية المتاحة: ${item.total_meters} ${item.unit || "متر"}`,
+                                }))}
+                              value={groupItemEditForm.inventory_item_id || ""}
+                              onChange={(v) => {
+                                const selectedItem = inventory.find((item) => String(item.id) === String(v));
+                                setGroupItemEditForm({
+                                  ...groupItemEditForm,
+                                  inventory_item_id: v,
+                                  section_id: selectedItem?.section_id ?? groupItemEditForm.section_id ?? "",
+                                  description:
+                                    selectedItem?.item_name ||
+                                    selectedItem?.color_number ||
+                                    groupItemEditForm.description ||
+                                    "",
+                                  unit: selectedItem?.unit || groupItemEditForm.unit || "متر",
+                                });
+                              }}
+                              placeholder={groupItemEditForm.section_id ? "اختر الصنف" : "اختر القسم أولا"}
+                              searchPlaceholder="بحث عن صنف..."
+                              disabled={!groupItemEditForm.section_id}
+                              className="py-3 text-base min-h-[48px]"
+                            />
+                          </div>
+                          <div className="col-span-2">
+                            <label className={`block text-xs font-semibold mb-1 ${theme === "dark" ? "text-gray-400" : "text-gray-600"}`}>البيان</label>
+                            <input
+                              type="text"
+                              value={groupItemEditForm.description}
+                              onChange={(e) => setGroupItemEditForm({ ...groupItemEditForm, description: e.target.value })}
+                              className={`w-full px-3 py-2 rounded-lg text-sm border ${theme === "dark" ? "bg-gray-700 text-white border-gray-600" : "bg-white text-gray-900 border-gray-300"}`}
+                            />
+                          </div>
+                          <div>
+                            <label className={`block text-xs font-semibold mb-1 ${theme === "dark" ? "text-gray-400" : "text-gray-600"}`}>الكمية</label>
+                            <input
+                              type="number"
+                              step="0.01"
+                              value={groupItemEditForm.quantity}
+                              onChange={(e) => setGroupItemEditForm({ ...groupItemEditForm, quantity: e.target.value })}
+                              className={`w-full px-3 py-2 rounded-lg text-sm border ${theme === "dark" ? "bg-gray-700 text-white border-gray-600" : "bg-white text-gray-900 border-gray-300"}`}
+                            />
+                          </div>
+                          <div>
+                            <label className={`block text-xs font-semibold mb-1 ${theme === "dark" ? "text-gray-400" : "text-gray-600"}`}>السعر</label>
+                            <input
+                              type="number"
+                              step="0.01"
+                              value={groupItemEditForm.price}
+                              onChange={(e) => setGroupItemEditForm({ ...groupItemEditForm, price: e.target.value })}
+                              className={`w-full px-3 py-2 rounded-lg text-sm border ${theme === "dark" ? "bg-gray-700 text-white border-gray-600" : "bg-white text-gray-900 border-gray-300"}`}
+                            />
+                          </div>
+                          <div>
+                            <label className={`block text-xs font-semibold mb-1 ${theme === "dark" ? "text-gray-400" : "text-gray-600"}`}>المسدد</label>
+                            <input
+                              type="number"
+                              step="0.01"
+                              value={groupItemEditForm.paid}
+                              onChange={(e) => setGroupItemEditForm({ ...groupItemEditForm, paid: e.target.value })}
+                              className={`w-full px-3 py-2 rounded-lg text-sm border ${theme === "dark" ? "bg-gray-700 text-white border-gray-600" : "bg-white text-gray-900 border-gray-300"}`}
+                            />
+                          </div>
+                          <div>
+                            <label className={`block text-xs font-semibold mb-1 ${theme === "dark" ? "text-gray-400" : "text-gray-600"}`}>التاريخ</label>
+                            <input
+                              type="date"
+                              value={groupItemEditForm.date}
+                              onChange={(e) => setGroupItemEditForm({ ...groupItemEditForm, date: e.target.value })}
+                              className={`w-full px-3 py-2 rounded-lg text-sm border ${theme === "dark" ? "bg-gray-700 text-white border-gray-600" : "bg-white text-gray-900 border-gray-300"}`}
+                            />
+                          </div>
+                          {groupItemEditForm.inventory_item_id && (
+                            <div>
+                              <label className={`block text-xs font-semibold mb-1 ${theme === "dark" ? "text-gray-400" : "text-gray-600"}`}>عدد الأتواب</label>
+                              <input
+                                type="number"
+                                min="1"
+                                step="1"
+                                value={groupItemEditForm.rolls_sold}
+                                onChange={(e) => setGroupItemEditForm({ ...groupItemEditForm, rolls_sold: e.target.value })}
+                                className={`w-full px-3 py-2 rounded-lg text-sm border ${theme === "dark" ? "bg-gray-700 text-white border-gray-600" : "bg-white text-gray-900 border-gray-300"}`}
+                                required
+                              />
+                            </div>
+                          )}
+                        </div>
+                        {(groupItemEditForm.quantity && groupItemEditForm.price) && (
+                          <div className={`text-center text-sm font-bold mb-3 py-1 rounded ${theme === "dark" ? "text-amber-400 bg-gray-700" : "text-amber-700 bg-amber-100"}`}>
+                            الإجمالي: {formatNumber((parseFloat(groupItemEditForm.quantity) || 0) * (parseFloat(groupItemEditForm.price) || 0))} ج.م
+                          </div>
+                        )}
+                        <div className="flex gap-2">
+                          <button
+                            type="button"
+                            onClick={() => saveGroupItemInlineEdit(order.id)}
+                            className={`flex-1 py-2 rounded-lg text-sm font-semibold ${theme === "dark" ? "bg-camel text-black hover:bg-camel/80" : "bg-brown text-white hover:bg-brown/80"}`}
+                          >
+                            حفظ
+                          </button>
+                          <button
+                            type="button"
+                            onClick={cancelGroupItemInlineEdit}
+                            className="flex-1 py-2 rounded-lg text-sm font-semibold bg-gray-400 text-white hover:bg-gray-500"
+                          >
+                            إلغاء
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      /* Card display */
+                      <div className={`flex items-center gap-3 p-3 rounded-xl border-r-4 ${theme === "dark" ? "bg-gray-800 border-r-camel" : "bg-gray-50 border-r-brown"}`}>
+                        <div className="flex-1 text-right min-w-0">
+                          <div className={`font-semibold truncate ${theme === "dark" ? "text-gray-100" : "text-gray-800"}`}>
+                            {order.description || "صنف"}
+                          </div>
+                          <div className={`text-xs mt-0.5 ${theme === "dark" ? "text-gray-400" : "text-gray-500"}`}>
+                            كمية: {formatNumber(order.quantity)} {order.unit || "متر"} &nbsp;•&nbsp; سعر: {formatNumber(order.price)} ج.م
+                          </div>
+                        </div>
+                        <div className={`font-bold text-sm whitespace-nowrap ${theme === "dark" ? "text-camel" : "text-brown"}`}>
+                          {formatNumber((order.quantity || 0) * (order.price || 0))} ج.م
+                        </div>
+                        <div className="flex items-center gap-1 flex-shrink-0">
+                          <button
+                            type="button"
+                            onClick={() => startGroupItemInlineEdit(order)}
+                            className="p-1.5 rounded text-blue-500 hover:text-blue-600 hover:bg-blue-50"
+                            title="تعديل هذا الصنف"
+                          >
+                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536M4 20h4l9.768-9.768a2.5 2.5 0 10-3.536-3.536L4 16v4z" />
+                            </svg>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleDeleteOrder({ id: order.id })}
+                            className="p-1.5 rounded text-red-500 hover:text-red-600 hover:bg-red-50"
+                            title="حذف هذا الصنف"
+                          >
+                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6M9 7V4a1 1 0 011-1h4a1 1 0 011 1v3m-9 0h10" />
+                            </svg>
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+              <p className={`text-xs mt-4 text-center ${theme === "dark" ? "text-gray-600" : "text-gray-400"}`}>
+                يمكنك تعديل أو حذف أي صنف. الحذف يزيل الصنف فقط دون حذف الفاتورة كاملاً.
+              </p>
+            </div>
           </div>
         </div>
       )}
@@ -2290,7 +3842,7 @@ function CustomerDetails({ customer, onClose }) {
 
       {/* Delete Confirmation Dialog */}
       {showDeleteDialog && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-[110] p-4">
+        <div className="fixed inset-0 bg-black bg-opacity-75 flex items-center justify-center p-4" style={{ zIndex: 9999 }}>
           <div
             className={`p-6 rounded-lg w-96 max-w-md ${
               theme === "dark" ? "bg-gray-900" : "bg-white"
@@ -2465,12 +4017,7 @@ function CustomerDetails({ customer, onClose }) {
                   step="0.01"
                   placeholder="الكمية"
                   value={returnedOrderFormData.quantity}
-                  onChange={(e) =>
-                    setReturnedOrderFormData({
-                      ...returnedOrderFormData,
-                      quantity: e.target.value,
-                    })
-                  }
+                  onChange={(e) => handleReturnedQuantityChange(e.target.value)}
                   className={`w-full px-3 py-2 rounded ${
                     theme === "dark"
                       ? "bg-gray-800 text-white"
@@ -2562,6 +4109,30 @@ function CustomerDetails({ customer, onClose }) {
               </div>
 
               <div>
+                <label
+                  className={`block text-sm font-semibold mb-1 ${
+                    theme === "dark" ? "text-gray-300" : "text-gray-700"
+                  }`}
+                >
+                  عدد الأتواب
+                </label>
+                <input
+                  type="number"
+                  min="0"
+                  step="1"
+                  placeholder="أدخل عدد الأتواب"
+                  value={returnedOrderFormData.rolls_count}
+                  onChange={(e) => handleReturnedRollsChange(e.target.value)}
+                  className={`w-full px-3 py-2 rounded ${
+                    theme === "dark"
+                      ? "bg-gray-800 text-white"
+                      : "bg-gray-100 text-gray-900"
+                  }`}
+                  required={returnedOrderFormData.add_to_inventory}
+                />
+              </div>
+
+              <div>
                 <label className="flex items-center gap-2">
                   <input
                     type="checkbox"
@@ -2594,23 +4165,22 @@ function CustomerDetails({ customer, onClose }) {
                     >
                       القسم
                     </label>
-                    <select
+                    <SearchableSelect
+                      options={sections.map((s) => ({ value: s.id, label: s.name }))}
                       value={selectedSectionId}
-                      onChange={(e) => setSelectedSectionId(e.target.value)}
-                      className={`w-full px-3 py-2 rounded ${
-                        theme === "dark"
-                          ? "bg-gray-800 text-white"
-                          : "bg-gray-100 text-gray-900"
-                      }`}
+                      onChange={(v) => {
+                        setSelectedSectionId(v);
+                        setReturnedOrderFormData({
+                          ...returnedOrderFormData,
+                          section_id: v,
+                          inventory_item_id: "",
+                          rolls_count: "",
+                        });
+                      }}
+                      placeholder="اختر القسم"
+                      searchPlaceholder="بحث عن قسم..."
                       required={returnedOrderFormData.add_to_inventory}
-                    >
-                      <option value="">اختر القسم</option>
-                      {sections.map((section) => (
-                        <option key={section.id} value={section.id}>
-                          {section.name}
-                        </option>
-                      ))}
-                    </select>
+                    />
                   </div>
 
                   {selectedSectionId && (
@@ -2622,37 +4192,43 @@ function CustomerDetails({ customer, onClose }) {
                       >
                         الصنف في المخزون
                       </label>
-                      <select
+                      <SearchableSelect
+                        options={inventory
+                          .filter((item) => item.section_id == selectedSectionId)
+                          .map((item) => ({
+                            value: item.id,
+                            label: `${item.color_number ? `رقم ${item.color_number}` : item.item_name || "صنف"} - الكمية المتاحة: ${item.total_meters} ${item.unit || "متر"}`
+                          }))}
                         value={returnedOrderFormData.inventory_item_id}
-                        onChange={(e) =>
+                        onChange={(v) => {
+                          const selectedItem = inventory.find(
+                            (item) => String(item.id) === String(v)
+                          );
+
                           setReturnedOrderFormData({
                             ...returnedOrderFormData,
-                            inventory_item_id: e.target.value,
+                            inventory_item_id: v,
                             section_id: selectedSectionId,
-                          })
-                        }
-                        className={`w-full px-3 py-2 rounded ${
-                          theme === "dark"
-                            ? "bg-gray-800 text-white"
-                            : "bg-gray-100 text-gray-900"
-                        }`}
+                            unit: selectedItem?.unit || returnedOrderFormData.unit,
+                          });
+                        }}
+                        placeholder="اختر الصنف"
+                        searchPlaceholder="بحث عن صنف..."
                         required={returnedOrderFormData.add_to_inventory}
-                      >
-                        <option value="">اختر الصنف</option>
-                        {inventory
-                          .filter(
-                            (item) =>
-                              item.section_id == selectedSectionId
-                          )
-                          .map((item) => (
-                            <option key={item.id} value={item.id}>
-                              {item.color_number} - {item.total_meters}{" "}
-                              {item.unit || "متر"}
-                            </option>
-                          ))}
-                      </select>
+                      />
+                      {returnedOrderFormData.inventory_item_id && (
+                        <p
+                          className={`mt-1 text-xs ${
+                            theme === "dark" ? "text-gray-400" : "text-gray-600"
+                          }`}
+                        >
+                          عدد الأتواب الحالي بالمخزون:{" "}
+                          {selectedReturnedInventoryItem?.rolls_count ?? 0}
+                        </p>
+                      )}
                     </div>
                   )}
+
                 </>
               )}
 

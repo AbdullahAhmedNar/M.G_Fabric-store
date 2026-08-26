@@ -230,6 +230,12 @@ class DatabaseManager {
     const hasGlobalSequence = cols.some((c) => c.name === "global_sequence");
     const hasUnitCost = cols.some((c) => c.name === "unit_cost");
     const hasCustomerId = cols.some((c) => c.name === "customer_id");
+    const hasOrderGroupId = cols.some((c) => c.name === "order_group_id");
+    const hasSectionId = cols.some((c) => c.name === "section_id");
+    const hasRollsSold = cols.some((c) => c.name === "rolls_sold");
+    const hasSoldItemName = cols.some((c) => c.name === "sold_item_name");
+    const hasSoldColorNumber = cols.some((c) => c.name === "sold_color_number");
+    const hasSoldSectionName = cols.some((c) => c.name === "sold_section_name");
     if (!hasUnit) {
       this.db.exec('ALTER TABLE sales ADD COLUMN unit TEXT DEFAULT "متر"');
     }
@@ -245,6 +251,53 @@ class DatabaseManager {
     if (!hasCustomerId) {
       this.db.exec("ALTER TABLE sales ADD COLUMN customer_id INTEGER");
     }
+    if (!hasOrderGroupId) {
+      this.db.exec("ALTER TABLE sales ADD COLUMN order_group_id TEXT");
+    }
+    if (!hasSectionId) {
+      this.db.exec("ALTER TABLE sales ADD COLUMN section_id INTEGER");
+    }
+    if (!hasRollsSold) {
+      this.db.exec("ALTER TABLE sales ADD COLUMN rolls_sold INTEGER");
+    }
+    if (!hasSoldItemName) {
+      this.db.exec('ALTER TABLE sales ADD COLUMN sold_item_name TEXT DEFAULT ""');
+    }
+    if (!hasSoldColorNumber) {
+      this.db.exec('ALTER TABLE sales ADD COLUMN sold_color_number TEXT DEFAULT ""');
+    }
+    if (!hasSoldSectionName) {
+      this.db.exec('ALTER TABLE sales ADD COLUMN sold_section_name TEXT DEFAULT ""');
+    }
+
+    this.db.exec(`
+      UPDATE sales
+      SET sold_item_name = COALESCE(NULLIF(TRIM(sold_item_name), ''), (
+          SELECT item_name FROM inventory inv WHERE inv.id = sales.inventory_item_id
+        ), description, '')
+      WHERE sold_item_name IS NULL OR TRIM(sold_item_name) = '';
+    `);
+    this.db.exec(`
+      UPDATE sales
+      SET sold_color_number = COALESCE(NULLIF(TRIM(sold_color_number), ''), (
+          SELECT color_number FROM inventory inv WHERE inv.id = sales.inventory_item_id
+        ), '')
+      WHERE sold_color_number IS NULL OR TRIM(sold_color_number) = '';
+    `);
+    this.db.exec(`
+      UPDATE sales
+      SET sold_section_name = COALESCE(NULLIF(TRIM(sold_section_name), ''), (
+          SELECT sec.name
+          FROM inventory_sections sec
+          WHERE sec.id = sales.section_id
+        ), (
+          SELECT sec2.name
+          FROM inventory inv2
+          LEFT JOIN inventory_sections sec2 ON sec2.id = inv2.section_id
+          WHERE inv2.id = sales.inventory_item_id
+        ), '')
+      WHERE sold_section_name IS NULL OR TRIM(sold_section_name) = '';
+    `);
   }
 
   ensureReturnedOrdersTable() {
@@ -258,12 +311,17 @@ class DatabaseManager {
       price REAL,
       inventory_item_id INTEGER,
       section_id INTEGER,
+      rolls_count INTEGER,
       date TEXT
     )`);
     const cols = this.db.pragma("table_info(returned_orders)");
     const hasCustomerId = cols.some((c) => c.name === "customer_id");
+    const hasRollsCount = cols.some((c) => c.name === "rolls_count");
     if (!hasCustomerId) {
       this.db.exec("ALTER TABLE returned_orders ADD COLUMN customer_id INTEGER");
+    }
+    if (!hasRollsCount) {
+      this.db.exec("ALTER TABLE returned_orders ADD COLUMN rolls_count INTEGER");
     }
   }
 
@@ -492,6 +550,12 @@ class DatabaseManager {
       notification_threshold INTEGER DEFAULT 2
     )`);
 
+    this.db.exec(`CREATE TABLE IF NOT EXISTS hidden_top_selling_sections (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      section_name TEXT NOT NULL UNIQUE,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    )`);
+
     // sales: track revenue entries
     this.db.exec(`CREATE TABLE IF NOT EXISTS sales (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -522,7 +586,7 @@ class DatabaseManager {
         .prepare(
           `INSERT INTO settings (id, app_name, theme, notification_threshold) VALUES (1, ?, ?, ?)`
         )
-        .run("M.G – نظام إدارة محل الأقمشة", "dark", 2);
+        .run("M.G FASHION FABRIC", "light", 2);
     } else {
       const columns = this.db.pragma("table_info(settings)");
       const hasNotificationThreshold = columns.some(
@@ -1392,6 +1456,19 @@ class DatabaseManager {
     this.db.prepare("DELETE FROM inventory_sections WHERE id = ?").run(id);
   }
 
+  hideTopSellingSection(sectionName) {
+    const normalizedName = (sectionName || "").trim();
+    if (!normalizedName) {
+      throw new Error("اسم القسم مطلوب");
+    }
+
+    this.db
+      .prepare(
+        `INSERT OR IGNORE INTO hidden_top_selling_sections (section_name) VALUES (?)`
+      )
+      .run(normalizedName);
+  }
+
   addInventoryItem(data) {
     const stmt = this.db.prepare(
       `INSERT INTO inventory (item_name, section_id, color_number, rolls_count, total_meters, unit, purchase_price) VALUES (?, ?, ?, ?, ?, ?, ?)`
@@ -1464,26 +1541,63 @@ class DatabaseManager {
       data.remaining !== undefined ? parseFloat(data.remaining) : total - paid;
 
     let unitCost = 0;
+    let soldItemName = (data.sold_item_name || "").toString().trim();
+    let soldColorNumber = (data.sold_color_number || "").toString().trim();
+    let soldSectionName = (data.sold_section_name || "").toString().trim();
+    let resolvedSectionId = data.section_id || null;
     if (data.inventory_item_id) {
       const item = this.getInventoryById(data.inventory_item_id);
       if (item) {
         unitCost = parseFloat(item.purchase_price || 0);
+        if (!soldItemName) soldItemName = (item.item_name || "").toString().trim();
+        if (!soldColorNumber)
+          soldColorNumber = (item.color_number || "").toString().trim();
+        if (item.section_id != null) {
+          resolvedSectionId = item.section_id;
+        }
+        if (!soldSectionName && resolvedSectionId) {
+          const section = this.getSectionById(resolvedSectionId);
+          soldSectionName = (section?.name || "").toString().trim();
+        }
         const newMeters = (item.total_meters || 0) - qty;
-        if (newMeters >= 0) {
-          const currentRolls = item.rolls_count || 0;
+        if (newMeters < 0) {
+          throw {
+            code: "INSUFFICIENT_INVENTORY",
+            message: `الكمية المطلوبة (${qty}) أكبر من المتاح في المخزون (${item.total_meters || 0})`
+          };
+        }
+        const currentRolls = item.rolls_count || 0;
+        const rollsSold = parseInt(data.rolls_sold, 10);
+        const hasRollsSold = !isNaN(rollsSold) && rollsSold > 0;
+        let newRolls = currentRolls;
+        if (hasRollsSold) {
+          if (rollsSold > currentRolls) {
+            throw {
+              code: "INSUFFICIENT_ROLLS",
+              message: `عدد الأتواب المطلوب (${rollsSold}) أكبر من المتاح (${currentRolls})`
+            };
+          }
+          newRolls = Math.max(0, currentRolls - rollsSold);
+        } else {
           const metersPerRoll =
             currentRolls > 0 ? item.total_meters / currentRolls : 0;
-          let newRolls = currentRolls;
           if (metersPerRoll > 0) {
             newRolls = Math.max(0, Math.round(newMeters / metersPerRoll));
           }
-          this.db
-            .prepare(
-              "UPDATE inventory SET total_meters = ?, rolls_count = ? WHERE id = ?"
-            )
-            .run(newMeters, newRolls, data.inventory_item_id);
         }
+        this.db
+          .prepare(
+            "UPDATE inventory SET total_meters = ?, rolls_count = ? WHERE id = ?"
+          )
+          .run(newMeters, newRolls, data.inventory_item_id);
       }
+    }
+    if (!soldItemName) {
+      soldItemName = (data.description || "").toString().trim();
+    }
+    if (!soldSectionName && resolvedSectionId) {
+      const section = this.getSectionById(resolvedSectionId);
+      soldSectionName = (section?.name || "").toString().trim();
     }
 
     let customerId = data.customer_id || null;
@@ -1495,8 +1609,9 @@ class DatabaseManager {
     }
 
     const globalSequence = customerId ? this.getNextGlobalSequence("customer", customerId) : 1;
+    const rollsSoldVal = data.rolls_sold != null && data.rolls_sold !== "" ? parseInt(data.rolls_sold, 10) : null;
     const stmt = this.db.prepare(
-      `INSERT INTO sales (global_sequence, customer_id, customer_name, description, inventory_item_id, quantity, unit, price, total, paid, remaining, date, unit_cost) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO sales (global_sequence, customer_id, customer_name, description, inventory_item_id, quantity, unit, price, total, paid, remaining, date, unit_cost, order_group_id, section_id, rolls_sold, sold_item_name, sold_color_number, sold_section_name) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     );
     const result = stmt.run(
       globalSequence,
@@ -1511,7 +1626,13 @@ class DatabaseManager {
       paid,
       remaining,
       data.date,
-      unitCost
+      unitCost,
+      data.order_group_id || null,
+      resolvedSectionId,
+      !isNaN(rollsSoldVal) ? rollsSoldVal : null,
+      soldItemName,
+      soldColorNumber,
+      soldSectionName
     );
     return result.lastInsertRowid;
   }
@@ -1529,39 +1650,78 @@ class DatabaseManager {
       data.remaining !== undefined ? parseFloat(data.remaining) : total - paid;
 
     const targetInventoryId = data.inventory_item_id || (oldSale ? oldSale.inventory_item_id : null);
+    const rollsSoldVal = data.rolls_sold != null && data.rolls_sold !== "" ? parseInt(data.rolls_sold, 10) : null;
+    let soldItemName = (data.sold_item_name || oldSale?.sold_item_name || "").toString().trim();
+    let soldColorNumber = (data.sold_color_number || oldSale?.sold_color_number || "").toString().trim();
+    let soldSectionName = (data.sold_section_name || oldSale?.sold_section_name || "").toString().trim();
+    let resolvedSectionId = data.section_id ?? oldSale?.section_id ?? null;
 
-    if (oldSale && oldSale.inventory_item_id) {
-      const item = this.getInventoryById(oldSale.inventory_item_id);
-      if (item) {
-        let restoredMeters = (item.total_meters || 0) + (oldSale.quantity || 0);
-        const currentRolls = item.rolls_count || 0;
-        const metersPerRoll =
-          currentRolls > 0 ? item.total_meters / currentRolls : 0;
-        let newRolls = currentRolls;
-        if (metersPerRoll > 0) {
-          newRolls = Math.max(0, Math.round(restoredMeters / metersPerRoll));
-        }
-        this.db
-          .prepare(
-            "UPDATE inventory SET total_meters = ?, rolls_count = ? WHERE id = ?"
-          )
-          .run(restoredMeters, newRolls, oldSale.inventory_item_id);
-      }
-    }
-
-    let unitCost = 0;
-    if (targetInventoryId) {
-      const item = this.getInventoryById(targetInventoryId);
-      if (item) {
-        unitCost = parseFloat(item.purchase_price || 0);
-        const newMeters = (item.total_meters || 0) - qty;
-        if (newMeters >= 0) {
+    const txn = this.db.transaction(() => {
+      if (oldSale && oldSale.inventory_item_id) {
+        const item = this.getInventoryById(oldSale.inventory_item_id);
+        if (item) {
+          let restoredMeters = (item.total_meters || 0) + (oldSale.quantity || 0);
           const currentRolls = item.rolls_count || 0;
-          const metersPerRoll =
-            currentRolls > 0 ? item.total_meters / currentRolls : 0;
+          const oldRollsSold = parseInt(oldSale.rolls_sold, 10);
+          const hadRollsSold = !isNaN(oldRollsSold) && oldRollsSold > 0;
           let newRolls = currentRolls;
-          if (metersPerRoll > 0) {
-            newRolls = Math.max(0, Math.round(newMeters / metersPerRoll));
+          if (hadRollsSold) {
+            newRolls = currentRolls + oldRollsSold;
+          } else {
+            const metersPerRoll =
+              currentRolls > 0 ? item.total_meters / currentRolls : 0;
+            if (metersPerRoll > 0) {
+              newRolls = Math.max(0, Math.round(restoredMeters / metersPerRoll));
+            }
+          }
+          this.db
+            .prepare(
+              "UPDATE inventory SET total_meters = ?, rolls_count = ? WHERE id = ?"
+            )
+            .run(restoredMeters, newRolls, oldSale.inventory_item_id);
+        }
+      }
+
+      let unitCost = 0;
+      if (targetInventoryId) {
+        const item = this.getInventoryById(targetInventoryId);
+        if (item) {
+          unitCost = parseFloat(item.purchase_price || 0);
+          if (!soldItemName) soldItemName = (item.item_name || "").toString().trim();
+          if (!soldColorNumber)
+            soldColorNumber = (item.color_number || "").toString().trim();
+          if (item.section_id != null) {
+            resolvedSectionId = item.section_id;
+          }
+          if (!soldSectionName && resolvedSectionId) {
+            const section = this.getSectionById(resolvedSectionId);
+            soldSectionName = (section?.name || "").toString().trim();
+          }
+          const newMeters = (item.total_meters || 0) - qty;
+          if (newMeters < 0) {
+            throw {
+              code: "INSUFFICIENT_INVENTORY",
+              message: `الكمية المطلوبة (${qty}) أكبر من المتاح في المخزون (${item.total_meters || 0})`
+            };
+          }
+          const currentRolls = item.rolls_count || 0;
+          const rollsSold = parseInt(data.rolls_sold, 10);
+          const hasRollsSold = !isNaN(rollsSold) && rollsSold > 0;
+          let newRolls = currentRolls;
+          if (hasRollsSold) {
+            if (rollsSold > currentRolls) {
+              throw {
+                code: "INSUFFICIENT_ROLLS",
+                message: `عدد الأتواب المطلوب (${rollsSold}) أكبر من المتاح (${currentRolls})`
+              };
+            }
+            newRolls = Math.max(0, currentRolls - rollsSold);
+          } else {
+            const metersPerRoll =
+              currentRolls > 0 ? item.total_meters / currentRolls : 0;
+            if (metersPerRoll > 0) {
+              newRolls = Math.max(0, Math.round(newMeters / metersPerRoll));
+            }
           }
           this.db
             .prepare(
@@ -1570,26 +1730,70 @@ class DatabaseManager {
             .run(newMeters, newRolls, targetInventoryId);
         }
       }
-    }
+      if (!soldItemName) {
+        soldItemName = (data.description || oldSale?.description || "").toString().trim();
+      }
+      if (!soldSectionName && resolvedSectionId) {
+        const section = this.getSectionById(resolvedSectionId);
+        soldSectionName = (section?.name || "").toString().trim();
+      }
 
-    this.db
+      this.db
+        .prepare(
+          `UPDATE sales SET customer_name=?, description=?, inventory_item_id=?, quantity=?, unit=?, price=?, total=?, paid=?, remaining=?, date=?, unit_cost=?, order_group_id=?, section_id=?, rolls_sold=?, sold_item_name=?, sold_color_number=?, sold_section_name=? WHERE id=?`
+        )
+        .run(
+          data.customer_name || null,
+          data.description || "",
+          targetInventoryId || null,
+          qty,
+          data.unit || "متر",
+          price,
+          total,
+          paid,
+          remaining,
+          data.date,
+          unitCost,
+          data.order_group_id ?? null,
+          resolvedSectionId,
+          !isNaN(rollsSoldVal) ? rollsSoldVal : null,
+          soldItemName,
+          soldColorNumber,
+          soldSectionName,
+          id
+        );
+
+      return { success: true };
+    });
+
+    return txn();
+  }
+
+  getSalesByInventoryItemId(inventoryItemId) {
+    this.ensureSalesTable();
+    return this.db
       .prepare(
-        `UPDATE sales SET customer_name=?, description=?, inventory_item_id=?, quantity=?, unit=?, price=?, total=?, paid=?, remaining=?, date=?, unit_cost=? WHERE id=?`
+        "SELECT * FROM sales WHERE inventory_item_id = ? ORDER BY date DESC, id DESC"
       )
-      .run(
-        data.customer_name || null,
-        data.description || "",
-        targetInventoryId || null,
-        qty,
-        data.unit || "متر",
-        price,
-        total,
-        paid,
-        remaining,
-        data.date,
-        unitCost,
-        id
-      );
+      .all(inventoryItemId);
+  }
+
+  getSupplierOrdersByInventoryItemId(inventoryItemId) {
+    if (!this.tableExists("suppliers")) return [];
+    return this.db
+      .prepare(
+        "SELECT * FROM suppliers WHERE inventory_item_id = ? ORDER BY date DESC, id DESC"
+      )
+      .all(inventoryItemId);
+  }
+
+  getReturnedOrdersByInventoryItemId(inventoryItemId) {
+    this.ensureReturnedOrdersTable();
+    return this.db
+      .prepare(
+        "SELECT * FROM returned_orders WHERE inventory_item_id = ? ORDER BY date DESC, id DESC"
+      )
+      .all(inventoryItemId);
   }
 
   deleteSale(id) {
@@ -1600,10 +1804,16 @@ class DatabaseManager {
       if (item) {
         const restoredMeters = (item.total_meters || 0) + (sale.quantity || 0);
         const currentRolls = item.rolls_count || 0;
-        const metersPerRoll = currentRolls > 0 ? item.total_meters / currentRolls : 0;
+        const rollsSold = parseInt(sale.rolls_sold, 10);
+        const hadRollsSold = !isNaN(rollsSold) && rollsSold > 0;
         let newRolls = currentRolls;
-        if (metersPerRoll > 0) {
-          newRolls = Math.max(0, Math.round(restoredMeters / metersPerRoll));
+        if (hadRollsSold) {
+          newRolls = currentRolls + rollsSold;
+        } else {
+          const metersPerRoll = currentRolls > 0 ? item.total_meters / currentRolls : 0;
+          if (metersPerRoll > 0) {
+            newRolls = Math.max(0, Math.round(restoredMeters / metersPerRoll));
+          }
         }
         this.db.prepare("UPDATE inventory SET total_meters = ?, rolls_count = ? WHERE id = ?").run(restoredMeters, newRolls, sale.inventory_item_id);
       }
@@ -1684,6 +1894,10 @@ class DatabaseManager {
     this.ensureReturnedOrdersTable();
     const qty = parseFloat(data.quantity) || 0;
     const price = parseFloat(data.price) || 0;
+    const returnedRolls =
+      data.rolls_count != null && data.rolls_count !== ""
+        ? Math.max(0, parseInt(data.rolls_count, 10) || 0)
+        : null;
     
     let customerId = data.customer_id || null;
     if (!customerId && data.customer_name) {
@@ -1700,12 +1914,14 @@ class DatabaseManager {
       if (item) {
         const newMeters = (item.total_meters || 0) + qty;
         const currentRolls = item.rolls_count || 0;
-        const metersPerRoll = currentRolls > 0 ? item.total_meters / currentRolls : 0;
-        let newRolls = currentRolls;
-        if (metersPerRoll > 0) {
+        const metersPerRoll =
+          currentRolls > 0 ? item.total_meters / currentRolls : 0;
+        let newRolls =
+          returnedRolls != null
+            ? currentRolls + returnedRolls
+            : currentRolls;
+        if (returnedRolls == null && metersPerRoll > 0) {
           newRolls = Math.max(0, Math.round(newMeters / metersPerRoll));
-        } else {
-          newRolls = currentRolls;
         }
         this.db
           .prepare("UPDATE inventory SET total_meters = ?, rolls_count = ?, unit = ? WHERE id = ?")
@@ -1714,7 +1930,7 @@ class DatabaseManager {
     }
 
     const stmt = this.db.prepare(
-      `INSERT INTO returned_orders (global_sequence, customer_id, customer_name, description, quantity, unit, price, inventory_item_id, section_id, date) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO returned_orders (global_sequence, customer_id, customer_name, description, quantity, unit, price, inventory_item_id, section_id, rolls_count, date) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     );
     const result = stmt.run(
       globalSequence,
@@ -1726,6 +1942,7 @@ class DatabaseManager {
       price,
       data.inventory_item_id || null,
       data.section_id || null,
+      returnedRolls,
       data.date
     );
     return result.lastInsertRowid;
@@ -1737,15 +1954,27 @@ class DatabaseManager {
 
     const qty = parseFloat(data.quantity) || 0;
     const price = parseFloat(data.price) || 0;
+    const returnedRolls =
+      data.rolls_count != null && data.rolls_count !== ""
+        ? Math.max(0, parseInt(data.rolls_count, 10) || 0)
+        : null;
 
     if (oldReturned && oldReturned.inventory_item_id) {
       const item = this.getInventoryById(oldReturned.inventory_item_id);
       if (item) {
         const restoredMeters = (item.total_meters || 0) - (oldReturned.quantity || 0);
         const currentRolls = item.rolls_count || 0;
-        const metersPerRoll = currentRolls > 0 ? item.total_meters / currentRolls : 0;
-        let newRolls = currentRolls;
-        if (metersPerRoll > 0) {
+        const previousReturnedRolls =
+          oldReturned.rolls_count != null
+            ? Math.max(0, parseInt(oldReturned.rolls_count, 10) || 0)
+            : null;
+        const metersPerRoll =
+          currentRolls > 0 ? item.total_meters / currentRolls : 0;
+        let newRolls =
+          previousReturnedRolls != null
+            ? Math.max(0, currentRolls - previousReturnedRolls)
+            : currentRolls;
+        if (previousReturnedRolls == null && metersPerRoll > 0) {
           newRolls = Math.max(0, Math.round(restoredMeters / metersPerRoll));
         }
         this.db
@@ -1761,9 +1990,13 @@ class DatabaseManager {
       if (item) {
         const newMeters = (item.total_meters || 0) + qty;
         const currentRolls = item.rolls_count || 0;
-        const metersPerRoll = currentRolls > 0 ? item.total_meters / currentRolls : 0;
-        let newRolls = currentRolls;
-        if (metersPerRoll > 0) {
+        const metersPerRoll =
+          currentRolls > 0 ? item.total_meters / currentRolls : 0;
+        let newRolls =
+          returnedRolls != null
+            ? currentRolls + returnedRolls
+            : currentRolls;
+        if (returnedRolls == null && metersPerRoll > 0) {
           newRolls = Math.max(0, Math.round(newMeters / metersPerRoll));
         }
         this.db
@@ -1774,7 +2007,7 @@ class DatabaseManager {
 
     this.db
       .prepare(
-        `UPDATE returned_orders SET customer_name=?, description=?, quantity=?, unit=?, price=?, inventory_item_id=?, section_id=?, date=? WHERE id=?`
+        `UPDATE returned_orders SET customer_name=?, description=?, quantity=?, unit=?, price=?, inventory_item_id=?, section_id=?, rolls_count=?, date=? WHERE id=?`
       )
       .run(
         data.customer_name || null,
@@ -1784,6 +2017,7 @@ class DatabaseManager {
         price,
         targetInventoryId || null,
         data.section_id || null,
+        returnedRolls,
         data.date,
         id
       );
@@ -1797,9 +2031,17 @@ class DatabaseManager {
       if (item) {
         const newMeters = (item.total_meters || 0) - (returned.quantity || 0);
         const currentRolls = item.rolls_count || 0;
-        const metersPerRoll = currentRolls > 0 ? item.total_meters / currentRolls : 0;
-        let newRolls = currentRolls;
-        if (metersPerRoll > 0) {
+        const returnedRolls =
+          returned.rolls_count != null
+            ? Math.max(0, parseInt(returned.rolls_count, 10) || 0)
+            : null;
+        const metersPerRoll =
+          currentRolls > 0 ? item.total_meters / currentRolls : 0;
+        let newRolls =
+          returnedRolls != null
+            ? Math.max(0, currentRolls - returnedRolls)
+            : currentRolls;
+        if (returnedRolls == null && metersPerRoll > 0) {
           newRolls = Math.max(0, Math.round(newMeters / metersPerRoll));
         }
         this.db
@@ -1813,8 +2055,8 @@ class DatabaseManager {
   getSettings() {
     return (
       this.db.prepare("SELECT * FROM settings WHERE id = 1").get() || {
-        app_name: "M.G – نظام إدارة محل الأقمشة",
-        theme: "dark",
+        app_name: "M.G FASHION FABRIC",
+        theme: "light",
         notification_threshold: 2,
       }
     );
@@ -1886,7 +2128,7 @@ class DatabaseManager {
           .prepare(
             "UPDATE settings SET app_name = ?, theme = ?, notification_threshold = ? WHERE id = 1"
           )
-          .run("M.G – نظام إدارة محل الأقمشة", "dark", 2);
+          .run("M.G FASHION FABRIC", "light", 2);
       }
 
       console.log("Database reset completed successfully");
@@ -2581,25 +2823,41 @@ class DatabaseManager {
       suppliersRemainingYear = Math.max(0, suppliersTotalYear - totalSuppliersPaidYear);
       suppliersCreditTotalYear = Math.max(0, totalSuppliersPaidYear - suppliersTotalYear);
 
-      // أكثر الأصناف مبيعاً حسب السنة
+      // أكثر الأصناف مبيعاً حسب السنة (صافي بعد خصم المرتجعات)
       const topSellingYear = this.db
         .prepare(
           `
         SELECT s.inventory_item_id AS inventoryId,
-               COALESCE(i.item_name,'') AS item_name,
-               COALESCE(i.color_number,'') AS color_number,
-               COALESCE(sec.name,'عام') AS section_name,
-               SUM(s.quantity) AS qty,
-               SUM(s.total) AS total
+               COALESCE(NULLIF(TRIM(s.sold_item_name),''), NULLIF(TRIM(i.item_name),''), NULLIF(TRIM(s.description),''), 'غير محدد') AS item_name,
+               COALESCE(NULLIF(TRIM(s.sold_color_number),''), NULLIF(TRIM(i.color_number),''), '') AS color_number,
+               COALESCE(NULLIF(TRIM(s.sold_section_name),''), NULLIF(TRIM(sec_from_sale.name),''), NULLIF(TRIM(sec_from_inventory.name),'')) AS section_name,
+               MAX(0, SUM(s.quantity) - COALESCE((
+                 SELECT SUM(ro.quantity) FROM returned_orders ro
+                 WHERE ro.inventory_item_id = s.inventory_item_id
+                   AND strftime('%Y', ro.date) = ?
+               ), 0)) AS qty,
+               MAX(0, SUM(s.total) - COALESCE((
+                 SELECT SUM(ro.quantity * ro.price) FROM returned_orders ro
+                 WHERE ro.inventory_item_id = s.inventory_item_id
+                   AND strftime('%Y', ro.date) = ?
+               ), 0)) AS total
         FROM sales s
         LEFT JOIN inventory i ON i.id = s.inventory_item_id
-        LEFT JOIN inventory_sections sec ON sec.id = i.section_id
-        WHERE s.inventory_item_id IS NOT NULL AND strftime('%Y', s.date) = ?
+        LEFT JOIN inventory_sections sec_from_inventory ON sec_from_inventory.id = i.section_id
+        LEFT JOIN inventory_sections sec_from_sale ON sec_from_sale.id = s.section_id
+        WHERE s.inventory_item_id IS NOT NULL
+          AND strftime('%Y', s.date) = ?
+          AND COALESCE(NULLIF(TRIM(s.sold_section_name),''), NULLIF(TRIM(sec_from_sale.name),''), NULLIF(TRIM(sec_from_inventory.name),'')) IS NOT NULL
+          AND TRIM(COALESCE(NULLIF(TRIM(s.sold_section_name),''), NULLIF(TRIM(sec_from_sale.name),''), NULLIF(TRIM(sec_from_inventory.name),''))) <> ''
+          AND LOWER(TRIM(COALESCE(NULLIF(TRIM(s.sold_section_name),''), NULLIF(TRIM(sec_from_sale.name),''), NULLIF(TRIM(sec_from_inventory.name),'')))) NOT IN (
+            SELECT LOWER(TRIM(section_name)) FROM hidden_top_selling_sections
+          )
         GROUP BY s.inventory_item_id
+        HAVING qty > 0
         ORDER BY qty DESC, total DESC
       `
         )
-        .all(yr.year);
+        .all(yr.year, yr.year, yr.year);
 
       // حساب الأرباح والخسائر حسب السنة
       const costOfSoldItemsYear = this.db
@@ -2661,21 +2919,34 @@ class DatabaseManager {
       };
     }
 
-    // Top selling items
+    // Top selling items (صافي بعد خصم المرتجعات)
     const topSelling = this.db
       .prepare(
         `
       SELECT s.inventory_item_id AS inventoryId,
-             COALESCE(i.item_name,'') AS item_name,
-             COALESCE(i.color_number,'') AS color_number,
-             COALESCE(sec.name,'عام') AS section_name,
-             SUM(s.quantity) AS qty,
-             SUM(s.total) AS total
+             COALESCE(NULLIF(TRIM(s.sold_item_name),''), NULLIF(TRIM(i.item_name),''), NULLIF(TRIM(s.description),''), 'غير محدد') AS item_name,
+             COALESCE(NULLIF(TRIM(s.sold_color_number),''), NULLIF(TRIM(i.color_number),''), '') AS color_number,
+             COALESCE(NULLIF(TRIM(s.sold_section_name),''), NULLIF(TRIM(sec_from_sale.name),''), NULLIF(TRIM(sec_from_inventory.name),'')) AS section_name,
+             MAX(0, SUM(s.quantity) - COALESCE((
+               SELECT SUM(ro.quantity) FROM returned_orders ro
+               WHERE ro.inventory_item_id = s.inventory_item_id
+             ), 0)) AS qty,
+             MAX(0, SUM(s.total) - COALESCE((
+               SELECT SUM(ro.quantity * ro.price) FROM returned_orders ro
+               WHERE ro.inventory_item_id = s.inventory_item_id
+             ), 0)) AS total
       FROM sales s
       LEFT JOIN inventory i ON i.id = s.inventory_item_id
-      LEFT JOIN inventory_sections sec ON sec.id = i.section_id
+      LEFT JOIN inventory_sections sec_from_inventory ON sec_from_inventory.id = i.section_id
+      LEFT JOIN inventory_sections sec_from_sale ON sec_from_sale.id = s.section_id
       WHERE s.inventory_item_id IS NOT NULL
+        AND COALESCE(NULLIF(TRIM(s.sold_section_name),''), NULLIF(TRIM(sec_from_sale.name),''), NULLIF(TRIM(sec_from_inventory.name),'')) IS NOT NULL
+        AND TRIM(COALESCE(NULLIF(TRIM(s.sold_section_name),''), NULLIF(TRIM(sec_from_sale.name),''), NULLIF(TRIM(sec_from_inventory.name),''))) <> ''
+        AND LOWER(TRIM(COALESCE(NULLIF(TRIM(s.sold_section_name),''), NULLIF(TRIM(sec_from_sale.name),''), NULLIF(TRIM(sec_from_inventory.name),'')))) NOT IN (
+          SELECT LOWER(TRIM(section_name)) FROM hidden_top_selling_sections
+        )
       GROUP BY s.inventory_item_id
+      HAVING qty > 0
       ORDER BY qty DESC, total DESC
     `
       )
