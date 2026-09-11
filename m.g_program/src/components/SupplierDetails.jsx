@@ -5,10 +5,12 @@ import { formatNumber, formatDateToDisplay, parseDisplayDateToISO } from "../uti
 import { apiUrl } from "../utils/api";
 import * as XLSX from "xlsx";
 import ConfirmDialog from "./ConfirmDialog";
+import SearchableSelect from "./SearchableSelect";
 
 function SupplierDetails({ supplier, onClose }) {
-  const { theme } = useTheme();
+  const { theme, appName } = useTheme();
   const { addNotification } = useNotification();
+  const isArchivedAccount = Number(supplier?.is_active ?? 1) === 0;
   const [orders, setOrders] = useState([]);
   const [payments, setPayments] = useState([]);
   const [allTransactions, setAllTransactions] = useState([]);
@@ -21,6 +23,19 @@ function SupplierDetails({ supplier, onClose }) {
   const [deleteItem, setDeleteItem] = useState(null);
   const [showWhatsAppModal, setShowWhatsAppModal] = useState(false);
   const [whatsappPhone, setWhatsappPhone] = useState("");
+  const [showAllTransactions, setShowAllTransactions] = useState(false);
+  const [showFinancialColumns, setShowFinancialColumns] = useState(() => {
+    try {
+      const saved = localStorage.getItem("mg_showFinancialColumns_supplier");
+      return saved === null ? true : saved === "true";
+    } catch {
+      return true;
+    }
+  });
+  const [transactionSearch, setTransactionSearch] = useState("");
+  const [showPrintRangeModal, setShowPrintRangeModal] = useState(false);
+  const [printRangeFrom, setPrintRangeFrom] = useState("");
+  const [printRangeTo, setPrintRangeTo] = useState("");
   const [paymentFormData, setPaymentFormData] = useState({
     amount: "",
     description: "",
@@ -47,15 +62,27 @@ function SupplierDetails({ supplier, onClose }) {
   const [orderDateInputValue, setOrderDateInputValue] = useState("");
 
   useEffect(() => {
-    if (showOrderModal) setOrderDateInputValue(formatDateToDisplay(orderFormData.date));
-  }, [orderFormData.date, showOrderModal]);
-
-  useEffect(() => {
     if (supplier) {
+      setShowAllTransactions(false);
+      setTransactionSearch("");
+      setShowPrintRangeModal(false);
+      setPrintRangeFrom("");
+      setPrintRangeTo("");
       fetchSupplierData();
       fetchSections();
     }
   }, [supplier]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(
+        "mg_showFinancialColumns_supplier",
+        String(showFinancialColumns)
+      );
+    } catch {
+      // ignore storage errors
+    }
+  }, [showFinancialColumns]);
 
   useEffect(() => {
     if (orderFormData.section_id) {
@@ -754,12 +781,26 @@ function SupplierDetails({ supplier, onClose }) {
     addNotification("تم تصدير كشف الحساب إلى Excel", "success");
   };
 
-  const generatePDF = () => {
-    const transactionsWithBalance = calculateRunningBalance();
+  const generatePDF = (fromOp = null, toOp = null) => {
+    let transactionsWithBalance = calculateRunningBalance();
     const accountStatus = getAccountStatus();
 
+    if (fromOp != null && toOp != null) {
+      transactionsWithBalance = transactionsWithBalance.filter((t) => {
+        const idx = t.localIndex || 0;
+        return idx >= fromOp && idx <= toOp;
+      });
+    }
+
+    if (!transactionsWithBalance.length) {
+      addNotification("لا توجد عمليات في النطاق المحدد للطباعة", "error");
+      return;
+    }
+
     const today = new Date().toISOString().split("T")[0];
-    const fileName = `كشف حساب المورد - ${supplier.name} - ${today}`;
+    const rangeLabel =
+      fromOp != null && toOp != null ? ` (من ${fromOp} إلى ${toOp})` : "";
+    const fileName = `كشف حساب المورد - ${supplier.name} - ${today}${rangeLabel}`;
 
     const printContent = `
       <!DOCTYPE html>
@@ -790,19 +831,21 @@ function SupplierDetails({ supplier, onClose }) {
         <table>
           <thead>
             <tr>
-              <td colspan="8" class="thead-header">
+              <td colspan="9" class="thead-header">
                 <div class="print-title">
-                  <h1>M.G Fabric Store</h1>
+                  <h1>${appName || 'M.G FASHION FABRIC'}</h1>
                   <h2>كشف حساب المورد</h2>
                 </div>
                 <div class="print-info">
                   <p><strong>اسم المورد:</strong> ${supplier.name}</p>
                   <p><strong>حالة الحساب:</strong> ${accountStatus.status}${accountStatus.amount > 0 ? ` - ${formatNumber(accountStatus.amount)} ج.م` : ""}</p>
+                  ${fromOp != null && toOp != null ? `<p><strong>نطاق الطباعة:</strong> من العملية ${fromOp} إلى ${toOp}</p>` : ""}
                   <p><strong>التاريخ:</strong> ${new Date().toLocaleDateString("ar-EG")}</p>
                 </div>
               </td>
             </tr>
             <tr>
+              <th>#</th>
               <th>الرصيد</th>
               <th>المسدد</th>
               <th>القيمة</th>
@@ -816,6 +859,7 @@ function SupplierDetails({ supplier, onClose }) {
           <tbody>
             ${transactionsWithBalance.map((t) => `
               <tr class="${t.type === "payment" ? "red-border-row" : ""}">
+                <td>${t.localIndex || ""}</td>
                 <td>${formatNumber(Math.abs(t.runningBalance))}</td>
                 <td>${t.type === "payment" ? formatNumber(t.amount) : (t.paid ? formatNumber(t.paid) : "0")}</td>
                 <td>${t.type === "order" ? formatNumber(t.total) : ""}</td>
@@ -839,6 +883,36 @@ function SupplierDetails({ supplier, onClose }) {
     setTimeout(() => {
       printWindow.print();
     }, 250);
+  };
+
+  const openPrintRangeModal = () => {
+    const txs = calculateRunningBalance();
+    setPrintRangeFrom(txs.length ? "1" : "");
+    setPrintRangeTo(txs.length ? String(txs.length) : "");
+    setShowPrintRangeModal(true);
+  };
+
+  const handlePrintRangeConfirm = () => {
+    const txs = calculateRunningBalance();
+    const maxOp = txs.length;
+    const fromOp = parseInt(printRangeFrom, 10);
+    const toOp = parseInt(printRangeTo, 10);
+
+    if (Number.isNaN(fromOp) || Number.isNaN(toOp)) {
+      addNotification("يرجى إدخال رقمي عملية صحيحين", "error");
+      return;
+    }
+    if (fromOp < 1 || toOp < 1 || fromOp > maxOp || toOp > maxOp) {
+      addNotification(`النطاق يجب أن يكون بين 1 و ${maxOp}`, "error");
+      return;
+    }
+    if (fromOp > toOp) {
+      addNotification("رقم البداية يجب أن يكون أقل من أو يساوي رقم النهاية", "error");
+      return;
+    }
+
+    setShowPrintRangeModal(false);
+    generatePDF(fromOp, toOp);
   };
 
   const generatePDFForWhatsApp = () => {
@@ -886,6 +960,43 @@ function SupplierDetails({ supplier, onClose }) {
   const paymentCount = (
     Array.isArray(allTransactions) ? allTransactions : []
   ).filter((t) => t.type === "payment").length;
+  const transactionsWithBalance = calculateRunningBalance();
+
+  const filterTransactionsBySearch = (transactions, search) => {
+    const q = (search || "").trim();
+    if (!q) return transactions;
+
+    const asNum = parseInt(q, 10);
+    const isPureNumber = !Number.isNaN(asNum) && String(asNum) === q;
+
+    if (isPureNumber) {
+      return transactions.filter((t) => (t.localIndex || 0) >= asNum);
+    }
+
+    const lower = q.toLowerCase();
+    const firstMatch = transactions.find((t) =>
+      String(t.description || "").toLowerCase().includes(lower)
+    );
+    if (!firstMatch) return [];
+    const startIdx = firstMatch.localIndex || 1;
+    return transactions.filter((t) => (t.localIndex || 0) >= startIdx);
+  };
+
+  const filteredTransactions = filterTransactionsBySearch(
+    transactionsWithBalance,
+    transactionSearch
+  );
+  const TRANSACTION_PREVIEW_LIMIT = 15;
+  const hasMoreTransactions =
+    filteredTransactions.length > TRANSACTION_PREVIEW_LIMIT;
+  const visibleTransactions =
+    showAllTransactions || !hasMoreTransactions
+      ? filteredTransactions
+      : filteredTransactions.slice(0, TRANSACTION_PREVIEW_LIMIT);
+  const hiddenTransactionsCount = Math.max(
+    0,
+    filteredTransactions.length - TRANSACTION_PREVIEW_LIMIT
+  );
 
   return (
     <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
@@ -1017,6 +1128,7 @@ function SupplierDetails({ supplier, onClose }) {
           </div>
 
           {/* Account Status */}
+          {showFinancialColumns && (
           <div
             className={`p-4 rounded-lg mb-6 ${
               theme === "dark" ? "bg-gray-800" : "bg-gray-100"
@@ -1037,6 +1149,7 @@ function SupplierDetails({ supplier, onClose }) {
               </span>
             </div>
           </div>
+          )}
 
           {/* Summary */}
           <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
@@ -1133,21 +1246,70 @@ function SupplierDetails({ supplier, onClose }) {
           {/* Action Buttons */}
           <div className="flex gap-3 mb-6">
             <button
-              onClick={openPaymentModal}
-              className={`px-4 py-2 rounded-lg font-semibold ${
-                theme === "dark" ? "bg-camel text-black" : "bg-brown text-white"
+              type="button"
+              onClick={() => setShowFinancialColumns((prev) => !prev)}
+              className={`flex items-center gap-2 px-3 py-2 rounded-full text-sm font-semibold border backdrop-blur-sm transition ${
+                theme === "dark"
+                  ? "border-camel/40 text-camel bg-black/30 hover:bg-black/50"
+                  : "border-brown/30 text-brown bg-white/70 hover:bg-white"
               }`}
+              title={
+                showFinancialColumns
+                  ? "إخفاء أعمدة الرصيد والمبالغ"
+                  : "إظهار أعمدة الرصيد والمبالغ"
+              }
             >
-              تسديد دفعة
+              <span className="relative w-7 h-4 rounded-full bg-gray-300 dark:bg-gray-700 overflow-hidden">
+                <span
+                  className={`absolute top-[2px] w-3 h-3 rounded-full shadow-sm transform transition-transform duration-300 ${
+                    showFinancialColumns
+                      ? "translate-x-[14px] bg-green-500"
+                      : "translate-x-[2px] bg-red-500"
+                  }`}
+                />
+              </span>
+              <svg
+                className="w-5 h-5"
+                fill="none"
+                stroke="currentColor"
+                viewBox="0 0 24 24"
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={2}
+                  d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
+                />
+              </svg>
             </button>
-            <button
-              onClick={() => openOrderModal()}
-              className={`px-4 py-2 rounded-lg font-semibold ${
-                theme === "dark" ? "bg-camel text-black" : "bg-brown text-white"
-              }`}
-            >
-              إضافة أوردر جديد
-            </button>
+            {isArchivedAccount ? (
+              <span
+                className={`px-4 py-2 rounded-lg font-semibold text-sm ${
+                  theme === "dark" ? "bg-gray-700 text-gray-200" : "bg-gray-200 text-gray-700"
+                }`}
+              >
+                حساب مؤرشف — للعرض والطباعة بس، ومفيش معاملات جديدة عليه
+              </span>
+            ) : (
+              <>
+                <button
+                  onClick={openPaymentModal}
+                  className={`px-4 py-2 rounded-lg font-semibold ${
+                    theme === "dark" ? "bg-camel text-black" : "bg-brown text-white"
+                  }`}
+                >
+                  تسديد دفعة
+                </button>
+                <button
+                  onClick={() => openOrderModal()}
+                  className={`px-4 py-2 rounded-lg font-semibold ${
+                    theme === "dark" ? "bg-camel text-black" : "bg-brown text-white"
+                  }`}
+                >
+                  إضافة أوردر جديد
+                </button>
+              </>
+            )}
             <button
               onClick={exportToExcel}
               className={`px-4 py-2 rounded-lg font-semibold ${
@@ -1157,7 +1319,7 @@ function SupplierDetails({ supplier, onClose }) {
               تصدير Excel
             </button>
             <button
-              onClick={generatePDF}
+              onClick={openPrintRangeModal}
               className={`px-4 py-2 rounded-lg font-semibold ${
                 theme === "dark" ? "bg-camel text-black" : "bg-brown text-white"
               }`}
@@ -1172,20 +1334,41 @@ function SupplierDetails({ supplier, onClose }) {
             >
               إرسال عبر واتساب
             </button>
-            <button
-              onClick={onClose}
-              className={`px-4 py-2 rounded-lg font-semibold ${
-                theme === "dark"
-                  ? "bg-gray-600 text-white"
-                  : "bg-gray-500 text-white"
-              }`}
-            >
-              إغلاق
-            </button>
+            <div className="relative flex-1 min-w-[200px] max-w-xs mr-auto">
+              <svg
+                className={`absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 ${
+                  theme === "dark" ? "text-gray-400" : "text-gray-500"
+                }`}
+                fill="none"
+                stroke="currentColor"
+                viewBox="0 0 24 24"
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={2}
+                  d="M21 21l-4.35-4.35M11 18a7 7 0 100-14 7 7 0 000 14z"
+                />
+              </svg>
+              <input
+                type="text"
+                value={transactionSearch}
+                onChange={(e) => {
+                  setTransactionSearch(e.target.value);
+                  setShowAllTransactions(false);
+                }}
+                placeholder="بحث برقم العملية أو اسم الصنف..."
+                className={`w-full pr-10 pl-3 py-2 rounded-lg border text-sm outline-none ${
+                  theme === "dark"
+                    ? "bg-gray-800 border-gray-700 text-gray-100 placeholder-gray-500"
+                    : "bg-white border-gray-300 text-gray-900 placeholder-gray-400"
+                }`}
+              />
+            </div>
           </div>
 
           {/* Transactions Table */}
-          {calculateRunningBalance().length > 0 ? (
+          {filteredTransactions.length > 0 ? (
             <div className="overflow-x-auto">
               <table
                 className={`w-full border ${
@@ -1205,34 +1388,38 @@ function SupplierDetails({ supplier, onClose }) {
                     >
                       #
                     </th>
-                    <th
-                      className={`px-3 py-2 text-right border ${
-                        theme === "dark" ? "border-gray-700" : "border-gray-300"
-                      }`}
-                    >
-                      الرصيد
-                    </th>
-                    <th
-                      className={`px-3 py-2 text-right border ${
-                        theme === "dark" ? "border-gray-700" : "border-gray-300"
-                      }`}
-                    >
-                      المسدد
-                    </th>
-                    <th
-                      className={`px-3 py-2 text-right border ${
-                        theme === "dark" ? "border-gray-700" : "border-gray-300"
-                      }`}
-                    >
-                      القيمة
-                    </th>
-                    <th
-                      className={`px-3 py-2 text-right border ${
-                        theme === "dark" ? "border-gray-700" : "border-gray-300"
-                      }`}
-                    >
-                      السعر
-                    </th>
+                    {showFinancialColumns && (
+                      <>
+                        <th
+                          className={`px-3 py-2 text-right border ${
+                            theme === "dark" ? "border-gray-700" : "border-gray-300"
+                          }`}
+                        >
+                          الرصيد
+                        </th>
+                        <th
+                          className={`px-3 py-2 text-right border ${
+                            theme === "dark" ? "border-gray-700" : "border-gray-300"
+                          }`}
+                        >
+                          المسدد
+                        </th>
+                        <th
+                          className={`px-3 py-2 text-right border ${
+                            theme === "dark" ? "border-gray-700" : "border-gray-300"
+                          }`}
+                        >
+                          القيمة
+                        </th>
+                        <th
+                          className={`px-3 py-2 text-right border ${
+                            theme === "dark" ? "border-gray-700" : "border-gray-300"
+                          }`}
+                        >
+                          السعر
+                        </th>
+                      </>
+                    )}
                     <th
                       className={`px-3 py-2 text-right border ${
                         theme === "dark" ? "border-gray-700" : "border-gray-300"
@@ -1271,7 +1458,7 @@ function SupplierDetails({ supplier, onClose }) {
                   </tr>
                 </thead>
                 <tbody>
-                  {calculateRunningBalance().map((transaction, index) => (
+                  {visibleTransactions.map((transaction, index) => (
                     <tr 
                       key={`${transaction.type}-${transaction.id || index}`}
                       className={
@@ -1296,50 +1483,54 @@ function SupplierDetails({ supplier, onClose }) {
                       >
                         {transaction.localIndex || index + 1}
                       </td>
-                      <td
-                        className={`px-3 py-2 text-center border ${
-                          theme === "dark"
-                            ? "border-gray-800"
-                            : "border-gray-300"
-                        } text-black`}
-                      >
-                        {formatNumber(Math.abs(transaction.runningBalance))}
-                      </td>
-                      <td
-                        className={`px-3 py-2 text-center border ${
-                          theme === "dark"
-                            ? "border-gray-800"
-                            : "border-gray-300"
-                        } text-red-500`}
-                      >
-                        {transaction.type === "payment"
-                          ? formatNumber(transaction.amount)
-                          : transaction.paid
-                          ? formatNumber(transaction.paid)
-                          : "0"}
-                      </td>
-                      <td
-                        className={`px-3 py-2 text-center border ${
-                          theme === "dark"
-                            ? "border-gray-800"
-                            : "border-gray-300"
-                        } text-green-500`}
-                      >
-                        {transaction.type === "order"
-                          ? formatNumber(transaction.total)
-                          : ""}
-                      </td>
-                      <td
-                        className={`px-3 py-2 text-center border ${
-                          theme === "dark"
-                            ? "border-gray-800"
-                            : "border-gray-300"
-                        }`}
-                      >
-                        {transaction.type === "order"
-                          ? formatNumber(transaction.price)
-                          : ""}
-                      </td>
+                      {showFinancialColumns && (
+                        <>
+                          <td
+                            className={`px-3 py-2 text-center border ${
+                              theme === "dark"
+                                ? "border-gray-800 text-amber-300"
+                                : "border-gray-300 text-brown"
+                            }`}
+                          >
+                            {formatNumber(Math.abs(transaction.runningBalance))}
+                          </td>
+                          <td
+                            className={`px-3 py-2 text-center border ${
+                              theme === "dark"
+                                ? "border-gray-800"
+                                : "border-gray-300"
+                            } text-red-500`}
+                          >
+                            {transaction.type === "payment"
+                              ? formatNumber(transaction.amount)
+                              : transaction.paid
+                              ? formatNumber(transaction.paid)
+                              : "0"}
+                          </td>
+                          <td
+                            className={`px-3 py-2 text-center border ${
+                              theme === "dark"
+                                ? "border-gray-800"
+                                : "border-gray-300"
+                            } text-green-500`}
+                          >
+                            {transaction.type === "order"
+                              ? formatNumber(transaction.total)
+                              : ""}
+                          </td>
+                          <td
+                            className={`px-3 py-2 text-center border ${
+                              theme === "dark"
+                                ? "border-gray-800"
+                                : "border-gray-300"
+                            }`}
+                          >
+                            {transaction.type === "order"
+                              ? formatNumber(transaction.price)
+                              : ""}
+                          </td>
+                        </>
+                      )}
                       <td
                         className={`px-3 py-2 text-center border ${
                           theme === "dark"
@@ -1482,6 +1673,38 @@ function SupplierDetails({ supplier, onClose }) {
                   ))}
                 </tbody>
               </table>
+              {hasMoreTransactions && (
+                <div className="mt-3 flex justify-center">
+                  <button
+                    type="button"
+                    onClick={() => setShowAllTransactions((prev) => !prev)}
+                    className={`inline-flex items-center gap-2 px-4 py-2 rounded-lg font-semibold transition ${
+                      theme === "dark"
+                        ? "bg-gray-800 text-camel hover:bg-gray-700 border border-gray-700"
+                        : "bg-gray-100 text-brown hover:bg-gray-200 border border-gray-300"
+                    }`}
+                  >
+                    <svg
+                      className={`w-4 h-4 transition-transform ${
+                        showAllTransactions ? "rotate-180" : ""
+                      }`}
+                      fill="none"
+                      stroke="currentColor"
+                      viewBox="0 0 24 24"
+                    >
+                      <path
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        strokeWidth={2}
+                        d="M19 9l-7 7-7-7"
+                      />
+                    </svg>
+                    {showAllTransactions
+                      ? "إخفاء باقي العمليات"
+                      : `شوف باقي العمليات (${hiddenTransactionsCount})`}
+                  </button>
+                </div>
+              )}
             </div>
           ) : (
             <div
@@ -1508,11 +1731,16 @@ function SupplierDetails({ supplier, onClose }) {
                   />
                 </svg>
                 <h3 className="text-xl font-semibold mb-2">
-                  لا توجد معاملات بعد
+                  {transactionSearch.trim()
+                    ? "لا توجد نتائج مطابقة للبحث"
+                    : "لا توجد معاملات بعد"}
                 </h3>
                 <p className="text-sm mb-4">
-                  هذا المورد جديد ولم يتم إضافة أي أوردرات أو دفعات بعد
+                  {transactionSearch.trim()
+                    ? "جرّب رقم عملية آخر أو اسم صنف مختلف"
+                    : "هذا المورد جديد ولم يتم إضافة أي أوردرات أو دفعات بعد"}
                 </p>
+                {!transactionSearch.trim() && !isArchivedAccount && (
                 <div className="flex gap-3 justify-center">
                   <button
                     onClick={() => openOrderModal()}
@@ -1535,6 +1763,7 @@ function SupplierDetails({ supplier, onClose }) {
                     تسديد دفعة
                   </button>
                 </div>
+                )}
               </div>
             </div>
           )}
@@ -2074,29 +2303,22 @@ function SupplierDetails({ supplier, onClose }) {
                     <div className="flex gap-2">
                       {!showNewSectionInput ? (
                         <>
-                          <select
-                            value={orderFormData.section_id}
-                            onChange={(e) =>
-                              setOrderFormData({
-                                ...orderFormData,
-                                section_id: e.target.value,
-                                inventory_item_id: "",
-                              })
-                            }
-                            className={`flex-1 px-3 py-2 rounded ${
-                              theme === "dark"
-                                ? "bg-gray-800 text-white"
-                                : "bg-gray-100 text-gray-900"
-                            }`}
-                            required={orderFormData.add_to_inventory && !showNewSectionInput}
-                          >
-                            <option value="">اختر القسم</option>
-                            {sections.map((section) => (
-                              <option key={section.id} value={section.id}>
-                                {section.name}
-                              </option>
-                            ))}
-                          </select>
+                          <div className="flex-1">
+                            <SearchableSelect
+                              options={sections.map((s) => ({ value: s.id, label: s.name }))}
+                              value={orderFormData.section_id}
+                              onChange={(v) =>
+                                setOrderFormData({
+                                  ...orderFormData,
+                                  section_id: v,
+                                  inventory_item_id: "",
+                                })
+                              }
+                              placeholder="اختر القسم"
+                              searchPlaceholder="بحث عن قسم..."
+                              required={orderFormData.add_to_inventory && !showNewSectionInput}
+                            />
+                          </div>
                           <button
                             type="button"
                             onClick={() => {
@@ -2150,27 +2372,24 @@ function SupplierDetails({ supplier, onClose }) {
                       >
                         الصنف (اختياري - اتركه فارغاً لإنشاء صنف جديد)
                       </label>
-                      <select
+                      <SearchableSelect
+                        options={[
+                          { value: "", label: "صنف جديد" },
+                          ...inventory.map((item) => ({
+                            value: item.id,
+                            label: `${item.item_name || "صنف"} ${item.color_number ? "- رقم " + item.color_number : ""}`,
+                          })),
+                        ]}
                         value={orderFormData.inventory_item_id}
-                        onChange={(e) =>
+                        onChange={(v) =>
                           setOrderFormData({
                             ...orderFormData,
-                            inventory_item_id: e.target.value,
+                            inventory_item_id: v,
                           })
                         }
-                        className={`w-full px-3 py-2 rounded ${
-                          theme === "dark"
-                            ? "bg-gray-800 text-white"
-                            : "bg-gray-100 text-gray-900"
-                        }`}
-                      >
-                        <option value="">صنف جديد</option>
-                        {inventory.map((item) => (
-                          <option key={item.id} value={item.id}>
-                            {item.item_name} {item.color_number ? `- رقم ${item.color_number}` : ""}
-                          </option>
-                        ))}
-                      </select>
+                        placeholder="صنف جديد"
+                        searchPlaceholder="بحث عن صنف..."
+                      />
                     </div>
                   )}
 
@@ -2307,18 +2526,14 @@ function SupplierDetails({ supplier, onClose }) {
                   التاريخ
                 </label>
                 <input
-                  type="text"
-                  dir="rtl"
-                  inputMode="numeric"
-                  placeholder="2026/1/29"
-                  value={orderDateInputValue}
-                  onChange={(e) => {
-                    setOrderDateInputValue(e.target.value);
-                    const iso = parseDisplayDateToISO(e.target.value);
-                    if (iso) setOrderFormData((prev) => ({ ...prev, date: iso }));
-                    else if (e.target.value === "") setOrderFormData((prev) => ({ ...prev, date: "" }));
-                  }}
-                  onBlur={() => setOrderDateInputValue(formatDateToDisplay(orderFormData.date))}
+                  type="date"
+                  value={orderFormData.date}
+                  onChange={(e) =>
+                    setOrderFormData((prev) => ({
+                      ...prev,
+                      date: e.target.value,
+                    }))
+                  }
                   className={`w-full px-3 py-2 rounded ${
                     theme === "dark" ? "bg-gray-800 text-white" : "bg-gray-100 text-gray-900"
                   }`}
@@ -2366,6 +2581,116 @@ function SupplierDetails({ supplier, onClose }) {
       )}
 
       {/* WhatsApp Modal */}
+      {/* Print Range Modal */}
+      {showPrintRangeModal && (
+        <div
+          className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-[100] p-4"
+          style={{ zIndex: 1000 }}
+        >
+          <div
+            className={`p-6 rounded-lg w-96 max-h-[90vh] overflow-y-auto ${
+              theme === "dark" ? "bg-gray-900" : "bg-white"
+            }`}
+          >
+            <div className="flex items-center justify-between mb-6">
+              <h3
+                className={`text-xl font-bold ${
+                  theme === "dark" ? "text-camel" : "text-brown"
+                }`}
+              >
+                طباعة نطاق العمليات
+              </h3>
+              <button
+                type="button"
+                onClick={() => setShowPrintRangeModal(false)}
+                className={`p-2 rounded-lg transition ${
+                  theme === "dark"
+                    ? "bg-gray-700 text-gray-300 hover:bg-gray-600"
+                    : "bg-gray-200 text-gray-700 hover:bg-gray-300"
+                }`}
+              >
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+            <p className={`text-sm mb-4 ${theme === "dark" ? "text-gray-400" : "text-gray-600"}`}>
+              اختر من رقم عملية إلى رقم عملية للطباعة فقط (الإجمالي المتاح:{" "}
+              {transactionsWithBalance.length})
+            </p>
+            <div className="space-y-4">
+              <div>
+                <label
+                  className={`block text-sm font-semibold mb-1 ${
+                    theme === "dark" ? "text-gray-300" : "text-gray-700"
+                  }`}
+                >
+                  من رقم العملية
+                </label>
+                <input
+                  type="number"
+                  min="1"
+                  value={printRangeFrom}
+                  onChange={(e) => setPrintRangeFrom(e.target.value)}
+                  className={`w-full px-3 py-2 rounded ${
+                    theme === "dark"
+                      ? "bg-gray-800 text-white"
+                      : "bg-gray-100 text-gray-900"
+                  }`}
+                />
+              </div>
+              <div>
+                <label
+                  className={`block text-sm font-semibold mb-1 ${
+                    theme === "dark" ? "text-gray-300" : "text-gray-700"
+                  }`}
+                >
+                  إلى رقم العملية
+                </label>
+                <input
+                  type="number"
+                  min="1"
+                  value={printRangeTo}
+                  onChange={(e) => setPrintRangeTo(e.target.value)}
+                  className={`w-full px-3 py-2 rounded ${
+                    theme === "dark"
+                      ? "bg-gray-800 text-white"
+                      : "bg-gray-100 text-gray-900"
+                  }`}
+                />
+              </div>
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={handlePrintRangeConfirm}
+                  className={`flex-1 py-2 px-4 rounded-lg font-semibold ${
+                    theme === "dark"
+                      ? "bg-camel text-black"
+                      : "bg-brown text-white"
+                  }`}
+                >
+                  طباعة
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowPrintRangeModal(false);
+                    generatePDF();
+                  }}
+                  className={`flex-1 py-2 px-4 rounded-lg font-semibold ${
+                    theme === "dark"
+                      ? "bg-gray-700 text-white"
+                      : "bg-gray-200 text-gray-800"
+                  }`}
+                >
+                  طباعة الكل
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {showWhatsAppModal && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-[100] p-4">
           <div

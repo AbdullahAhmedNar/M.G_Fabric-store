@@ -308,6 +308,8 @@ export const exportInventoryToExcel = async (inventory) => {
 
 export const exportStatisticsToExcel = (stats) => {
   try {
+    // تقرير الأرباح والخسائر يأتي محسوباً من الـbackend (أساس الاستحقاق)
+    const pl = stats?.profitLoss || {}
     // Create organized Excel structure for statistics
     const excelData = [
       // Header section
@@ -408,6 +410,45 @@ export const exportStatisticsToExcel = (stats) => {
         "",
       ],
       ["إجمالي المصروفات", (stats.expensesTotal || 0).toFixed(2), "ج.م", ""],
+      ["", "", "", ""],
+
+      // Profit & Loss statement (accrual basis)
+      ["قائمة الأرباح والخسائر (أساس الاستحقاق)", "", "", ""],
+      ["", "", "", ""],
+      ["1) الإيرادات", "", "", ""],
+      ["إجمالي المبيعات", (pl.grossSales || 0).toFixed(2), "ج.م", ""],
+      ["مرتجعات المبيعات", (pl.salesReturns || 0).toFixed(2), "ج.م", "تطرح"],
+      ["صافي المبيعات", (pl.netSales || 0).toFixed(2), "ج.م", ""],
+      ["", "", "", ""],
+      ["2) تكلفة البضاعة المباعة", "", "", ""],
+      ["تكلفة البضاعة المباعة", (pl.cogs || 0).toFixed(2), "ج.م", ""],
+      ["تكلفة البضاعة المرتجعة", (pl.returnedCogs || 0).toFixed(2), "ج.م", "تطرح"],
+      ["صافي تكلفة البضاعة", (pl.netCogs || 0).toFixed(2), "ج.م", ""],
+      ["", "", "", ""],
+      ["3) الربح الإجمالي", (pl.grossProfit || 0).toFixed(2), "ج.م",
+        pl.grossProfitMargin != null ? `هامش ${pl.grossProfitMargin.toFixed(2)}%` : ""],
+      ["", "", "", ""],
+      ["4) المصروفات التشغيلية", (pl.operatingExpenses || 0).toFixed(2), "ج.م", "تطرح"],
+      ["5) الإيرادات الأخرى", (pl.otherIncome || 0).toFixed(2), "ج.م", "تضاف"],
+      ["", "", "", ""],
+      ["6) صافي الربح", (pl.netProfit || 0).toFixed(2), "ج.م",
+        pl.netProfitMargin != null ? `هامش ${pl.netProfitMargin.toFixed(2)}%` : ""],
+      ["صافي الخسارة", (pl.netLoss || 0).toFixed(2), "ج.م", ""],
+      ["", "", "", ""],
+      ["7) النقدية والمديونيات (ليست إيراداً)", "", "", ""],
+      ["إجمالي التحصيلات", (pl.collections || 0).toFixed(2), "ج.م", ""],
+      ["تحصيلات مخصّصة على فواتير", (pl.allocatedCollections || 0).toFixed(2), "ج.م", ""],
+      ["تحصيلات غير مخصّصة", (pl.unallocatedCollections || 0).toFixed(2), "ج.م", "رصيد دائن للعملاء"],
+      ["مديونيات العملاء", (pl.accountsReceivable || 0).toFixed(2), "ج.م", ""],
+      ["نسبة التحصيل", (pl.collectionRate ?? 0).toFixed(2), "%", "مؤشر نقدي منفصل"],
+      ["", "", "", ""],
+      ["ملاحظات تسوية", (pl.reconciliationWarnings || []).length, "ملاحظة", ""],
+      ...(pl.reconciliationWarnings || []).map((w) => [
+        w.code,
+        w.message,
+        w.severity,
+        "",
+      ]),
       ["", "", "", ""],
 
       // Financial summary section

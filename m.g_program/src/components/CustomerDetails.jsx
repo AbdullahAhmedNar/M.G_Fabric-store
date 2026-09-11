@@ -4,9 +4,11 @@ import { useNotification } from "../context/NotificationContext";
 import { formatNumber } from "../utils/format";
 import SearchableSelect from "./SearchableSelect";
 
-function CustomerDetails({ customer, onClose }) {
+function CustomerDetails({ customer, onClose, autoOpenOrder = false, orderOnly = false }) {
   const { theme, appName } = useTheme();
   const { addNotification } = useNotification();
+  // الحساب المؤرشف: كشف الحساب بالكامل متاح للقراءة، لكن مفيش معاملات جديدة
+  const isArchivedAccount = Number(customer?.is_active ?? 1) === 0;
   const [orders, setOrders] = useState([]);
   const [payments, setPayments] = useState([]);
   const [returnedOrders, setReturnedOrders] = useState([]);
@@ -60,9 +62,41 @@ function CustomerDetails({ customer, onClose }) {
   const [showWhatsAppModal, setShowWhatsAppModal] = useState(false);
   const [whatsappPhone, setWhatsappPhone] = useState("");
   const [showGroupOrderModal, setShowGroupOrderModal] = useState(false);
+  const [showAllTransactions, setShowAllTransactions] = useState(false);
+  const [showFinancialColumns, setShowFinancialColumns] = useState(() => {
+    try {
+      const saved = localStorage.getItem("mg_showFinancialColumns_customer");
+      return saved === null ? true : saved === "true";
+    } catch {
+      return true;
+    }
+  });
+  const [transactionSearch, setTransactionSearch] = useState("");
+  const [showPrintRangeModal, setShowPrintRangeModal] = useState(false);
+  const [printRangeFrom, setPrintRangeFrom] = useState("");
+  const [printRangeTo, setPrintRangeTo] = useState("");
   const [selectedGroupTransaction, setSelectedGroupTransaction] = useState(null);
   const [editingGroupItemId, setEditingGroupItemId] = useState(null);
   const [groupItemEditForm, setGroupItemEditForm] = useState({});
+
+  useEffect(() => {
+    setShowAllTransactions(false);
+    setTransactionSearch("");
+    setShowPrintRangeModal(false);
+    setPrintRangeFrom("");
+    setPrintRangeTo("");
+  }, [customer?.id]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(
+        "mg_showFinancialColumns_customer",
+        String(showFinancialColumns)
+      );
+    } catch {
+      // ignore storage errors
+    }
+  }, [showFinancialColumns]);
 
   useEffect(() => {
     const load = async () => {
@@ -150,12 +184,26 @@ function CustomerDetails({ customer, onClose }) {
     }
   }, [orders, showGroupOrderModal, selectedGroupTransaction]);
 
-  const generatePDF = () => {
+  const generatePDF = (fromOp = null, toOp = null) => {
     const accountStatus = getAccountStatus();
-    const transactionsWithBalance = calculateRunningBalance();
+    let transactionsWithBalance = calculateRunningBalance();
+
+    if (fromOp != null && toOp != null) {
+      transactionsWithBalance = transactionsWithBalance.filter((t) => {
+        const idx = t.localIndex || 0;
+        return idx >= fromOp && idx <= toOp;
+      });
+    }
+
+    if (!transactionsWithBalance.length) {
+      addNotification("لا توجد عمليات في النطاق المحدد للطباعة", "error");
+      return;
+    }
 
     const today = new Date().toISOString().split("T")[0];
-    const fileName = `كشف حساب العميل - ${customer.name} - ${today}`;
+    const rangeLabel =
+      fromOp != null && toOp != null ? ` (من ${fromOp} إلى ${toOp})` : "";
+    const fileName = `كشف حساب العميل - ${customer.name} - ${today}${rangeLabel}`;
 
     const printContent = `
       <!DOCTYPE html>
@@ -186,7 +234,7 @@ function CustomerDetails({ customer, onClose }) {
         <table>
           <thead>
             <tr>
-              <td colspan="7" class="thead-header">
+              <td colspan="8" class="thead-header">
                 <div class="print-title">
                   <h1>${appName || 'M.G FASHION FABRIC'}</h1>
                   <h2>كشف حساب العميل</h2>
@@ -194,11 +242,13 @@ function CustomerDetails({ customer, onClose }) {
                 <div class="print-info">
                   <p><strong>اسم العميل:</strong> ${customer.name}</p>
                   <p><strong>حالة الحساب:</strong> ${accountStatus.status}${accountStatus.amount > 0 ? ` - ${formatNumber(accountStatus.amount)} ج.م` : ""}</p>
+                  ${fromOp != null && toOp != null ? `<p><strong>نطاق الطباعة:</strong> من العملية ${fromOp} إلى ${toOp}</p>` : ""}
                   <p><strong>التاريخ:</strong> ${new Date().toLocaleDateString("ar-EG")}</p>
                 </div>
               </td>
             </tr>
             <tr>
+              <th>#</th>
               <th>الرصيد</th>
               <th>المسدد</th>
               <th>القيمة</th>
@@ -211,6 +261,7 @@ function CustomerDetails({ customer, onClose }) {
           <tbody>
             ${transactionsWithBalance.map((t) => `
               <tr class="${t.type === "payment" || t.type === "returned_order" ? "red-border-row" : ""}">
+                <td>${t.localIndex || ""}</td>
                 <td>${formatNumber(Math.abs(t.runningBalance))}</td>
                 <td>${t.type === "payment" ? formatNumber(t.paid) : (t.paid ? formatNumber(t.paid) : "0")}</td>
                 <td>${t.type === "order" || t.type === "returned_order" ? formatNumber(Math.abs(t.value)) : ""}</td>
@@ -233,6 +284,36 @@ function CustomerDetails({ customer, onClose }) {
     setTimeout(() => {
       printWindow.print();
     }, 250);
+  };
+
+  const openPrintRangeModal = () => {
+    const txs = calculateRunningBalance();
+    setPrintRangeFrom(txs.length ? "1" : "");
+    setPrintRangeTo(txs.length ? String(txs.length) : "");
+    setShowPrintRangeModal(true);
+  };
+
+  const handlePrintRangeConfirm = () => {
+    const txs = calculateRunningBalance();
+    const maxOp = txs.length;
+    const fromOp = parseInt(printRangeFrom, 10);
+    const toOp = parseInt(printRangeTo, 10);
+
+    if (Number.isNaN(fromOp) || Number.isNaN(toOp)) {
+      addNotification("يرجى إدخال رقمي عملية صحيحين", "error");
+      return;
+    }
+    if (fromOp < 1 || toOp < 1 || fromOp > maxOp || toOp > maxOp) {
+      addNotification(`النطاق يجب أن يكون بين 1 و ${maxOp}`, "error");
+      return;
+    }
+    if (fromOp > toOp) {
+      addNotification("رقم البداية يجب أن يكون أقل من أو يساوي رقم النهاية", "error");
+      return;
+    }
+
+    setShowPrintRangeModal(false);
+    generatePDF(fromOp, toOp);
   };
 
   const printGroupInvoice = (transaction, items) => {
@@ -726,7 +807,19 @@ function CustomerDetails({ customer, onClose }) {
     setShowOrderModal(false);
     setEditingOrder(null);
     setOrderSelectedSectionId("");
+    if (orderOnly) {
+      onClose();
+    }
   };
+
+  useEffect(() => {
+    if (isArchivedAccount) return;
+    if (autoOpenOrder || orderOnly) {
+      openOrderModal();
+    }
+    // فتح مودال الأوردر مرة عند الطلب من صفحة العملاء
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoOpenOrder, orderOnly, customer?.id]);
 
   const handleOrderSubmit = async (e) => {
     e.preventDefault();
@@ -1380,6 +1473,42 @@ function CustomerDetails({ customer, onClose }) {
   ).length;
   const transactionsWithBalance = calculateRunningBalance();
 
+  const filterTransactionsBySearch = (transactions, search) => {
+    const q = (search || "").trim();
+    if (!q) return transactions;
+
+    const asNum = parseInt(q, 10);
+    const isPureNumber = !Number.isNaN(asNum) && String(asNum) === q;
+
+    if (isPureNumber) {
+      return transactions.filter((t) => (t.localIndex || 0) >= asNum);
+    }
+
+    const lower = q.toLowerCase();
+    const firstMatch = transactions.find((t) =>
+      String(t.description || "").toLowerCase().includes(lower)
+    );
+    if (!firstMatch) return [];
+    const startIdx = firstMatch.localIndex || 1;
+    return transactions.filter((t) => (t.localIndex || 0) >= startIdx);
+  };
+
+  const filteredTransactions = filterTransactionsBySearch(
+    transactionsWithBalance,
+    transactionSearch
+  );
+  const TRANSACTION_PREVIEW_LIMIT = 15;
+  const hasMoreTransactions =
+    filteredTransactions.length > TRANSACTION_PREVIEW_LIMIT;
+  const visibleTransactions =
+    showAllTransactions || !hasMoreTransactions
+      ? filteredTransactions
+      : filteredTransactions.slice(0, TRANSACTION_PREVIEW_LIMIT);
+  const hiddenTransactionsCount = Math.max(
+    0,
+    filteredTransactions.length - TRANSACTION_PREVIEW_LIMIT
+  );
+
   const selectedReturnedInventoryItem = returnedOrderFormData.inventory_item_id
     ? inventory.find(
         (item) =>
@@ -1705,6 +1834,8 @@ function CustomerDetails({ customer, onClose }) {
   };
 
   return (
+    <>
+      {!orderOnly && (
     <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
       <div
         id="customer-details-content"
@@ -1859,6 +1990,7 @@ function CustomerDetails({ customer, onClose }) {
           </div>
 
           {/* Account Status */}
+          {showFinancialColumns && (
           <div
             className={`p-4 rounded-lg mb-6 ${
               theme === "dark" ? "bg-gray-800" : "bg-gray-100"
@@ -1879,6 +2011,7 @@ function CustomerDetails({ customer, onClose }) {
               </span>
             </div>
           </div>
+          )}
 
           {/* Summary */}
           <div className="grid grid-cols-1 md:grid-cols-5 gap-2 mb-6">
@@ -1998,41 +2131,80 @@ function CustomerDetails({ customer, onClose }) {
           {/* Action Buttons */}
           <div className="flex gap-3 mb-6">
             <button
-              onClick={openPaymentModal}
-              className={`px-4 py-2 rounded-lg font-semibold ${
-                theme === "dark" ? "bg-camel text-black" : "bg-brown text-white"
+              type="button"
+              onClick={() => setShowFinancialColumns((prev) => !prev)}
+              className={`flex items-center gap-2 px-3 py-2 rounded-full text-sm font-semibold border backdrop-blur-sm transition ${
+                theme === "dark"
+                  ? "border-camel/40 text-camel bg-black/30 hover:bg-black/50"
+                  : "border-brown/30 text-brown bg-white/70 hover:bg-white"
               }`}
+              title={
+                showFinancialColumns
+                  ? "إخفاء أعمدة الرصيد والمبالغ"
+                  : "إظهار أعمدة الرصيد والمبالغ"
+              }
             >
-              تسديد دفعة
+              <span className="relative w-7 h-4 rounded-full bg-gray-300 dark:bg-gray-700 overflow-hidden">
+                <span
+                  className={`absolute top-[2px] w-3 h-3 rounded-full shadow-sm transform transition-transform duration-300 ${
+                    showFinancialColumns
+                      ? "translate-x-[14px] bg-green-500"
+                      : "translate-x-[2px] bg-red-500"
+                  }`}
+                />
+              </span>
+              <svg
+                className="w-5 h-5"
+                fill="none"
+                stroke="currentColor"
+                viewBox="0 0 24 24"
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={2}
+                  d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
+                />
+              </svg>
             </button>
+            {isArchivedAccount ? (
+              <span
+                className={`px-4 py-2 rounded-lg font-semibold text-sm ${
+                  theme === "dark" ? "bg-gray-700 text-gray-200" : "bg-gray-200 text-gray-700"
+                }`}
+              >
+                حساب مؤرشف — للعرض والطباعة بس، ومفيش معاملات جديدة عليه
+              </span>
+            ) : (
+              <>
+                <button
+                  onClick={openPaymentModal}
+                  className={`px-4 py-2 rounded-lg font-semibold ${
+                    theme === "dark" ? "bg-camel text-black" : "bg-brown text-white"
+                  }`}
+                >
+                  تسديد دفعة
+                </button>
+                <button
+                  onClick={() => openOrderModal()}
+                  className={`px-4 py-2 rounded-lg font-semibold ${
+                    theme === "dark" ? "bg-camel text-black" : "bg-brown text-white"
+                  }`}
+                >
+                  إضافة أوردر جديد
+                </button>
+                <button
+                  onClick={openReturnedOrderModal}
+                  className={`px-4 py-2 rounded-lg font-semibold ${
+                    theme === "dark" ? "bg-red-600 text-white" : "bg-red-500 text-white"
+                  }`}
+                >
+                  أوردر مرتجع
+                </button>
+              </>
+            )}
             <button
-              onClick={() => {
-                onClose();
-                sessionStorage.setItem('selectedCustomer', customer.name);
-                window.dispatchEvent(new CustomEvent('navigateToSales', { 
-                  detail: { customerName: customer.name } 
-                }));
-                if (window.location.pathname !== '/sales') {
-                  window.history.pushState({}, '', '/sales');
-                  window.dispatchEvent(new PopStateEvent('popstate'));
-                }
-              }}
-              className={`px-4 py-2 rounded-lg font-semibold ${
-                theme === "dark" ? "bg-camel text-black" : "bg-brown text-white"
-              }`}
-            >
-              إضافة أوردر جديد
-            </button>
-            <button
-              onClick={openReturnedOrderModal}
-              className={`px-4 py-2 rounded-lg font-semibold ${
-                theme === "dark" ? "bg-red-600 text-white" : "bg-red-500 text-white"
-              }`}
-            >
-              أوردر مرتجع
-            </button>
-            <button
-              onClick={generatePDF}
+              onClick={openPrintRangeModal}
               className={`px-4 py-2 rounded-lg font-semibold ${
                 theme === "dark" ? "bg-camel text-black" : "bg-brown text-white"
               }`}
@@ -2047,20 +2219,41 @@ function CustomerDetails({ customer, onClose }) {
             >
               إرسال عبر واتساب
             </button>
-            <button
-              onClick={onClose}
-              className={`px-4 py-2 rounded-lg font-semibold ${
-                theme === "dark"
-                  ? "bg-gray-600 text-white"
-                  : "bg-gray-500 text-white"
-              }`}
-            >
-              إغلاق
-            </button>
+            <div className="relative flex-1 min-w-[200px] max-w-xs mr-auto">
+              <svg
+                className={`absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 ${
+                  theme === "dark" ? "text-gray-400" : "text-gray-500"
+                }`}
+                fill="none"
+                stroke="currentColor"
+                viewBox="0 0 24 24"
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={2}
+                  d="M21 21l-4.35-4.35M11 18a7 7 0 100-14 7 7 0 000 14z"
+                />
+              </svg>
+              <input
+                type="text"
+                value={transactionSearch}
+                onChange={(e) => {
+                  setTransactionSearch(e.target.value);
+                  setShowAllTransactions(false);
+                }}
+                placeholder="بحث برقم العملية أو اسم الصنف..."
+                className={`w-full pr-10 pl-3 py-2 rounded-lg border text-sm outline-none ${
+                  theme === "dark"
+                    ? "bg-gray-800 border-gray-700 text-gray-100 placeholder-gray-500"
+                    : "bg-white border-gray-300 text-gray-900 placeholder-gray-400"
+                }`}
+              />
+            </div>
           </div>
 
           {/* Transactions Table */}
-          {transactionsWithBalance.length > 0 ? (
+          {filteredTransactions.length > 0 ? (
             <div className="overflow-x-auto">
               <table
                 className={`w-full border ${
@@ -2085,34 +2278,38 @@ function CustomerDetails({ customer, onClose }) {
                     >
                       #
                     </th>
-                    <th
-                      className={`text-right p-2 border ${
-                        theme === "dark" ? "border-gray-700" : "border-gray-300"
-                      }`}
-                    >
-                      الرصيد
-                    </th>
-                    <th
-                      className={`text-right p-2 border ${
-                        theme === "dark" ? "border-gray-700" : "border-gray-300"
-                      }`}
-                    >
-                      المسدد
-                    </th>
-                    <th
-                      className={`text-right p-2 border ${
-                        theme === "dark" ? "border-gray-700" : "border-gray-300"
-                      }`}
-                    >
-                      القيمة
-                    </th>
-                    <th
-                      className={`text-right p-2 border ${
-                        theme === "dark" ? "border-gray-700" : "border-gray-300"
-                      }`}
-                    >
-                      السعر
-                    </th>
+                    {showFinancialColumns && (
+                      <>
+                        <th
+                          className={`text-right p-2 border ${
+                            theme === "dark" ? "border-gray-700" : "border-gray-300"
+                          }`}
+                        >
+                          الرصيد
+                        </th>
+                        <th
+                          className={`text-right p-2 border ${
+                            theme === "dark" ? "border-gray-700" : "border-gray-300"
+                          }`}
+                        >
+                          المسدد
+                        </th>
+                        <th
+                          className={`text-right p-2 border ${
+                            theme === "dark" ? "border-gray-700" : "border-gray-300"
+                          }`}
+                        >
+                          القيمة
+                        </th>
+                        <th
+                          className={`text-right p-2 border ${
+                            theme === "dark" ? "border-gray-700" : "border-gray-300"
+                          }`}
+                        >
+                          السعر
+                        </th>
+                      </>
+                    )}
                     <th
                       className={`text-right p-2 border ${
                         theme === "dark" ? "border-gray-700" : "border-gray-300"
@@ -2144,7 +2341,7 @@ function CustomerDetails({ customer, onClose }) {
                   </tr>
                 </thead>
                 <tbody>
-                  {transactionsWithBalance.map((transaction, index) => (
+                  {visibleTransactions.map((transaction, index) => (
                     <tr 
                       key={`${transaction.type}-${transaction.id || index}`}
                       className={`${
@@ -2172,50 +2369,54 @@ function CustomerDetails({ customer, onClose }) {
                       >
                         {transaction.localIndex || index + 1}
                       </td>
-                      <td
-                        className={`px-3 py-2 text-center border ${
-                          theme === "dark"
-                            ? "border-gray-800 text-amber-300"
-                            : "border-gray-300 text-brown"
-                        }`}
-                      >
-                        {formatNumber(Math.abs(transaction.runningBalance))}
-                      </td>
-                      <td
-                        className={`px-3 py-2 text-center border ${
-                          theme === "dark"
-                            ? "border-gray-800"
-                            : "border-gray-300"
-                        } text-red-500`}
-                      >
-                        {transaction.type === "payment"
-                          ? formatNumber(transaction.paid)
-                          : transaction.paid
-                          ? formatNumber(transaction.paid)
-                          : "0"}
-                      </td>
-                      <td
-                        className={`px-3 py-2 text-center border ${
-                          theme === "dark"
-                            ? "border-gray-800"
-                            : "border-gray-300"
-                        } ${transaction.type === "returned_order" ? "text-red-500" : "text-green-500"}`}
-                      >
-                        {transaction.type === "order" || transaction.type === "returned_order"
-                          ? formatNumber(Math.abs(transaction.value))
-                          : ""}
-                      </td>
-                      <td
-                        className={`px-3 py-2 text-center border ${
-                          theme === "dark"
-                            ? "border-gray-800"
-                            : "border-gray-300"
-                        }`}
-                      >
-                        {transaction.type === "order" || transaction.type === "returned_order"
-                          ? formatNumber(transaction.price)
-                          : ""}
-                      </td>
+                      {showFinancialColumns && (
+                        <>
+                          <td
+                            className={`px-3 py-2 text-center border ${
+                              theme === "dark"
+                                ? "border-gray-800 text-amber-300"
+                                : "border-gray-300 text-brown"
+                            }`}
+                          >
+                            {formatNumber(Math.abs(transaction.runningBalance))}
+                          </td>
+                          <td
+                            className={`px-3 py-2 text-center border ${
+                              theme === "dark"
+                                ? "border-gray-800"
+                                : "border-gray-300"
+                            } text-red-500`}
+                          >
+                            {transaction.type === "payment"
+                              ? formatNumber(transaction.paid)
+                              : transaction.paid
+                              ? formatNumber(transaction.paid)
+                              : "0"}
+                          </td>
+                          <td
+                            className={`px-3 py-2 text-center border ${
+                              theme === "dark"
+                                ? "border-gray-800"
+                                : "border-gray-300"
+                            } ${transaction.type === "returned_order" ? "text-red-500" : "text-green-500"}`}
+                          >
+                            {transaction.type === "order" || transaction.type === "returned_order"
+                              ? formatNumber(Math.abs(transaction.value))
+                              : ""}
+                          </td>
+                          <td
+                            className={`px-3 py-2 text-center border ${
+                              theme === "dark"
+                                ? "border-gray-800"
+                                : "border-gray-300"
+                            }`}
+                          >
+                            {transaction.type === "order" || transaction.type === "returned_order"
+                              ? formatNumber(transaction.price)
+                              : ""}
+                          </td>
+                        </>
+                      )}
                       <td
                         className={`px-3 py-2 text-center border ${
                           theme === "dark"
@@ -2467,6 +2668,38 @@ function CustomerDetails({ customer, onClose }) {
                   ))}
                 </tbody>
               </table>
+              {hasMoreTransactions && (
+                <div className="mt-3 flex justify-center">
+                  <button
+                    type="button"
+                    onClick={() => setShowAllTransactions((prev) => !prev)}
+                    className={`inline-flex items-center gap-2 px-4 py-2 rounded-lg font-semibold transition ${
+                      theme === "dark"
+                        ? "bg-gray-800 text-camel hover:bg-gray-700 border border-gray-700"
+                        : "bg-gray-100 text-brown hover:bg-gray-200 border border-gray-300"
+                    }`}
+                  >
+                    <svg
+                      className={`w-4 h-4 transition-transform ${
+                        showAllTransactions ? "rotate-180" : ""
+                      }`}
+                      fill="none"
+                      stroke="currentColor"
+                      viewBox="0 0 24 24"
+                    >
+                      <path
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        strokeWidth={2}
+                        d="M19 9l-7 7-7-7"
+                      />
+                    </svg>
+                    {showAllTransactions
+                      ? "إخفاء باقي العمليات"
+                      : `شوف باقي العمليات (${hiddenTransactionsCount})`}
+                  </button>
+                </div>
+              )}
             </div>
           ) : (
             <div
@@ -2493,24 +2726,19 @@ function CustomerDetails({ customer, onClose }) {
                   />
                 </svg>
                 <h3 className="text-xl font-semibold mb-2">
-                  لا توجد معاملات بعد
+                  {transactionSearch.trim()
+                    ? "لا توجد نتائج مطابقة للبحث"
+                    : "لا توجد معاملات بعد"}
                 </h3>
                 <p className="text-sm mb-4">
-                  هذا العميل جديد ولم يتم إضافة أي أوردرات أو دفعات بعد
+                  {transactionSearch.trim()
+                    ? "جرّب رقم عملية آخر أو اسم صنف مختلف"
+                    : "هذا العميل جديد ولم يتم إضافة أي أوردرات أو دفعات بعد"}
                 </p>
+                {!transactionSearch.trim() && (
                 <div className="flex gap-3 justify-center">
                   <button
-                    onClick={() => {
-                      onClose();
-                      sessionStorage.setItem('selectedCustomer', customer.name);
-                      window.dispatchEvent(new CustomEvent('navigateToSales', { 
-                        detail: { customerName: customer.name } 
-                      }));
-                      if (window.location.pathname !== '/sales') {
-                        window.history.pushState({}, '', '/sales');
-                        window.dispatchEvent(new PopStateEvent('popstate'));
-                      }
-                    }}
+                    onClick={() => openOrderModal()}
                     className={`px-4 py-2 rounded-lg font-semibold ${
                       theme === "dark"
                         ? "bg-camel text-black"
@@ -2530,11 +2758,14 @@ function CustomerDetails({ customer, onClose }) {
                     تسديد دفعة
                   </button>
                 </div>
+                )}
               </div>
             </div>
           )}
         </div>
       </div>
+    </div>
+      )}
 
       {/* Payment Modal */}
       {showTransactionDetailsModal && selectedTransactionDetails && (
@@ -3729,6 +3960,116 @@ function CustomerDetails({ customer, onClose }) {
         </div>
       )}
 
+      {/* Print Range Modal */}
+      {showPrintRangeModal && (
+        <div
+          className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-[100] p-4"
+          style={{ zIndex: 1000 }}
+        >
+          <div
+            className={`p-6 rounded-lg w-96 max-h-[90vh] overflow-y-auto ${
+              theme === "dark" ? "bg-gray-900" : "bg-white"
+            }`}
+          >
+            <div className="flex items-center justify-between mb-6">
+              <h3
+                className={`text-xl font-bold ${
+                  theme === "dark" ? "text-camel" : "text-brown"
+                }`}
+              >
+                طباعة نطاق العمليات
+              </h3>
+              <button
+                type="button"
+                onClick={() => setShowPrintRangeModal(false)}
+                className={`p-2 rounded-lg transition ${
+                  theme === "dark"
+                    ? "bg-gray-700 text-gray-300 hover:bg-gray-600"
+                    : "bg-gray-200 text-gray-700 hover:bg-gray-300"
+                }`}
+              >
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+            <p className={`text-sm mb-4 ${theme === "dark" ? "text-gray-400" : "text-gray-600"}`}>
+              اختر من رقم عملية إلى رقم عملية للطباعة فقط (الإجمالي المتاح:{" "}
+              {transactionsWithBalance.length})
+            </p>
+            <div className="space-y-4">
+              <div>
+                <label
+                  className={`block text-sm font-semibold mb-1 ${
+                    theme === "dark" ? "text-gray-300" : "text-gray-700"
+                  }`}
+                >
+                  من رقم العملية
+                </label>
+                <input
+                  type="number"
+                  min="1"
+                  value={printRangeFrom}
+                  onChange={(e) => setPrintRangeFrom(e.target.value)}
+                  className={`w-full px-3 py-2 rounded ${
+                    theme === "dark"
+                      ? "bg-gray-800 text-white"
+                      : "bg-gray-100 text-gray-900"
+                  }`}
+                />
+              </div>
+              <div>
+                <label
+                  className={`block text-sm font-semibold mb-1 ${
+                    theme === "dark" ? "text-gray-300" : "text-gray-700"
+                  }`}
+                >
+                  إلى رقم العملية
+                </label>
+                <input
+                  type="number"
+                  min="1"
+                  value={printRangeTo}
+                  onChange={(e) => setPrintRangeTo(e.target.value)}
+                  className={`w-full px-3 py-2 rounded ${
+                    theme === "dark"
+                      ? "bg-gray-800 text-white"
+                      : "bg-gray-100 text-gray-900"
+                  }`}
+                />
+              </div>
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={handlePrintRangeConfirm}
+                  className={`flex-1 py-2 px-4 rounded-lg font-semibold ${
+                    theme === "dark"
+                      ? "bg-camel text-black"
+                      : "bg-brown text-white"
+                  }`}
+                >
+                  طباعة
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowPrintRangeModal(false);
+                    generatePDF();
+                  }}
+                  className={`flex-1 py-2 px-4 rounded-lg font-semibold ${
+                    theme === "dark"
+                      ? "bg-gray-700 text-white"
+                      : "bg-gray-200 text-gray-800"
+                  }`}
+                >
+                  طباعة الكل
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* WhatsApp Modal */}
       {showWhatsAppModal && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-[100] p-4">
@@ -4259,7 +4600,7 @@ function CustomerDetails({ customer, onClose }) {
           </div>
         </div>
       )}
-    </div>
+    </>
   );
 }
 

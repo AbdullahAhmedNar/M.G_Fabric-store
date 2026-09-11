@@ -2,7 +2,6 @@ import { useState, useEffect } from 'react'
 import { useTheme } from '../context/ThemeContext'
 import { useNotification } from '../context/NotificationContext'
 import ConfirmDialog from '../components/ConfirmDialog'
-import { exportInventoryToExcel } from '../utils/exportExcel'
 import { formatNumber } from '../utils/format'
 import InventoryDetails from '../components/InventoryDetails'
 
@@ -20,6 +19,7 @@ function Inventory() {
   const [showDetails, setShowDetails] = useState(false)
   const [selectedItem, setSelectedItem] = useState(null)
   const [notificationThreshold, setNotificationThreshold] = useState(0)
+  const [hiddenPriceSections, setHiddenPriceSections] = useState({})
   const [formData, setFormData] = useState({
     item_name: '',
     section_id: '',
@@ -249,6 +249,147 @@ function Inventory() {
     }
   }
 
+  const isPriceHiddenForCurrentSection = selectedSection
+    ? (hiddenPriceSections[selectedSection.id] ?? true)
+    : false
+
+  const togglePriceVisibilityForSection = () => {
+    if (!selectedSection) return
+    setHiddenPriceSections(prev => {
+      const current = prev[selectedSection.id]
+      const effectiveCurrent = current === undefined ? true : current
+      return {
+        ...prev,
+        [selectedSection.id]: !effectiveCurrent
+      }
+    })
+  }
+
+  const generateSectionPDF = () => {
+    if (!selectedSection) {
+      addNotification('يرجى اختيار قسم أولاً لعرض أصنافه', 'warning')
+      return
+    }
+
+    const sectionName = selectedSection.name || 'قسم'
+    const today = new Date().toLocaleDateString('ar-EG')
+    const shouldHidePrice = isPriceHiddenForCurrentSection
+
+    const totalItems = filteredInventory.length
+    const totalMeters = filteredInventory
+      .filter(i => !i.unit || i.unit === 'متر')
+      .reduce((sum, i) => sum + (parseFloat(i.total_meters) || 0), 0)
+    const totalKilos = filteredInventory
+      .filter(i => i.unit === 'كيلو')
+      .reduce((sum, i) => sum + (parseFloat(i.total_meters) || 0), 0)
+    const totalRolls = filteredInventory
+      .reduce((sum, i) => sum + (i.rolls_count ? parseInt(i.rolls_count) || 0 : 0), 0)
+
+    const rowsHtml = filteredInventory.map((item) => {
+      const meters = parseFloat(item.total_meters) || 0
+      const status =
+        meters <= 0
+          ? { text: 'منتهي' }
+          : meters <= notificationThreshold && notificationThreshold > 0
+          ? { text: 'منخفض' }
+          : { text: 'متاح' }
+      const displayName = `${item.item_name || 'صنف'}${item.color_number ? ' - رقم ' + item.color_number : ''}`
+
+      return `
+        <tr>
+          <td>${displayName}</td>
+          <td>${formatNumber(item.total_meters ?? 0)}</td>
+          <td>${item.rolls_count != null ? formatNumber(item.rolls_count) : '-'}</td>
+          <td>${item.unit || 'متر'}</td>
+          ${shouldHidePrice ? '' : `<td>${formatNumber(item.purchase_price ?? 0)}</td>`}
+          <td>${status.text}</td>
+        </tr>
+      `
+    }).join('')
+
+    const html = `<!DOCTYPE html>
+<html dir="rtl" lang="ar">
+<head>
+  <meta charset="UTF-8" />
+  <title>تقرير مخزون القسم - ${sectionName}</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: Arial, sans-serif; padding: 20px; direction: rtl; }
+    .print-title { text-align: center; padding: 10px 0; }
+    .print-title h1 { color: #8b5e3c; font-size: 22px; margin-bottom: 4px; }
+    .print-title h2 { font-size: 16px; color: #444; }
+    .print-info { padding: 8px 0 12px; font-size: 13px; }
+    .print-info p { margin: 3px 0; }
+    .stats-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin: 10px 0 16px; font-size: 12px; }
+    .stat-card { border: 1px solid #ddd; border-radius: 6px; padding: 6px 8px; text-align: center; }
+    .stat-label { color: #666; margin-bottom: 4px; }
+    .stat-value { font-weight: 700; color: #8b5e3c; font-size: 14px; }
+    table { width: 100%; border-collapse: collapse; font-size: 11px; margin-top: 10px; }
+    th { background-color: #8b5e3c; color: #fff; padding: 6px; border: 1px solid #ddd; }
+    td { padding: 6px; border: 1px solid #ddd; text-align: right; }
+    @media print {
+      body { print-color-adjust: exact; -webkit-print-color-adjust: exact; }
+      thead { display: table-header-group; }
+    }
+  </style>
+</head>
+<body>
+  <div class="print-title">
+    <h1>تقرير مخزون قسم</h1>
+    <h2>${sectionName}</h2>
+  </div>
+  <div class="print-info">
+    <p><strong>التاريخ:</strong> ${today}</p>
+  </div>
+  <div class="stats-grid">
+    <div class="stat-card">
+      <div class="stat-label">عدد الأصناف</div>
+      <div class="stat-value">${totalItems}</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">إجمالي الأمتار</div>
+      <div class="stat-value">${formatNumber(totalMeters)} متر</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">إجمالي الكيلوهات</div>
+      <div class="stat-value">${formatNumber(totalKilos)} كيلو</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">إجمالي الأتواب</div>
+      <div class="stat-value">${formatNumber(totalRolls)}</div>
+    </div>
+  </div>
+  <table>
+    <thead>
+      <tr>
+        <th>البيان</th>
+        <th>الكمية</th>
+        <th>عدد الأتواب</th>
+        <th>الوحدة</th>
+        ${shouldHidePrice ? '' : '<th>سعر الوحدة</th>'}
+        <th>الحالة</th>
+      </tr>
+    </thead>
+    <tbody>
+      ${rowsHtml}
+    </tbody>
+  </table>
+</body>
+</html>`
+
+    const win = window.open('', '_blank')
+    if (!win) {
+      addNotification('تعذر فتح نافذة الطباعة. يرجى السماح للنوافذ المنبثقة (Popups).', 'error')
+      return
+    }
+    win.document.write(html)
+    win.document.close()
+    win.focus()
+    setTimeout(() => {
+      win.print()
+    }, 300)
+  }
+
   const openModal = (item = null) => {
     if (item) {
       setEditingId(item.id)
@@ -305,22 +446,12 @@ function Inventory() {
   }
 
   const filteredInventory = inventory.filter(i => {
-    const matchesSearch = i.item_name.includes(searchTerm) || i.color_number.includes(searchTerm)
+    const name = i.item_name || ''
+    const color = i.color_number || ''
+    const term = searchTerm || ''
+    const matchesSearch = name.includes(term) || color.includes(term)
     return matchesSearch
   })
-
-  const handleExport = async () => {
-    try {
-      const success = await exportInventoryToExcel(inventory)
-      if (success) {
-      addNotification(' تم تصدير البيانات إلى Excel', 'success')
-    } else {
-        addNotification(' فشل التصدير', 'error')
-      }
-    } catch (error) {
-      addNotification(' فشل التصدير', 'error')
-    }
-  }
 
   const openSectionModal = (section = null) => {
     if (section) {
@@ -399,16 +530,19 @@ function Inventory() {
             {viewMode === 'sections' ? 'أقسام المخزون' : `مخزون ${selectedSection?.name}`}
           </h2>
         </div>
-        <div className="flex gap-2">
-          <button
-            onClick={handleExport}
-            className="flex items-center gap-2 px-4 py-3 bg-brown text-white rounded-lg font-semibold hover:brightness-110 transition"
-          >
-            <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 20 20">
-              <path fillRule="evenodd" d="M3 17a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm3.293-7.707a1 1 0 011.414 0L9 10.586V3a1 1 0 112 0v7.586l1.293-1.293a1 1 0 111.414 1.414l-3 3a1 1 0 01-1.414 0l-3-3a1 1 0 010-1.414z" clipRule="evenodd" />
-            </svg>
-            تصدير Excel
-          </button>
+        <div className="flex gap-2 items-center flex-wrap justify-end">
+          {viewMode === 'items' && selectedSection && (
+            <button
+              type="button"
+              onClick={generateSectionPDF}
+              className="flex items-center gap-2 px-4 py-3 bg-brown text-white rounded-lg font-semibold hover:brightness-110 transition"
+            >
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 11V3m0 8l-3-3m3 3l3-3M6 13h12v4a2 2 0 01-2 2H8a2 2 0 01-2-2v-4z" />
+              </svg>
+              طباعة تقرير القسم (PDF)
+            </button>
+          )}
           {viewMode === 'sections' ? (
             <button
               onClick={() => openSectionModal()}
@@ -419,14 +553,37 @@ function Inventory() {
               + إضافة قسم جديد
             </button>
           ) : (
-          <button
-            onClick={() => openModal()}
-            className={`px-6 py-3 rounded-lg font-semibold ${
-              theme === 'dark' ? 'bg-camel text-black' : 'bg-brown text-white'
-            }`}
-          >
-            + إضافة صنف جديد
-          </button>
+            <div className="flex gap-2 items-center flex-wrap">
+              <button
+                onClick={() => openModal()}
+                className={`px-6 py-3 rounded-lg font-semibold ${
+                  theme === 'dark' ? 'bg-camel text-black' : 'bg-brown text-white'
+                }`}
+              >
+                + إضافة صنف جديد
+              </button>
+              {selectedSection && (
+                <button
+                  type="button"
+                  onClick={togglePriceVisibilityForSection}
+                  className={`flex items-center gap-2 px-3 py-2 rounded-full text-sm font-semibold border backdrop-blur-sm transition ${
+                    theme === 'dark'
+                      ? 'border-camel/40 text-camel bg-black/30 hover:bg-black/50'
+                      : 'border-brown/30 text-brown bg-white/70 hover:bg-white'
+                  }`}
+                  title={isPriceHiddenForCurrentSection ? 'إظهار عمود السعر لهذا القسم' : 'إخفاء عمود السعر لهذا القسم'}
+                >
+                  <span className="relative w-7 h-4 rounded-full bg-gray-300 dark:bg-gray-700 overflow-hidden">
+                    <span
+                      className={`absolute top-[2px] w-3 h-3 rounded-full bg-green-500 shadow-sm transform transition-transform duration-300 ${
+                        isPriceHiddenForCurrentSection ? 'translate-x-[2px] bg-red-500' : 'translate-x-[14px]'
+                      }`}
+                    />
+                  </span>
+                  <span>{isPriceHiddenForCurrentSection ? 'السعر مخفي' : 'إظهار/إخفاء السعر'}</span>
+                </button>
+              )}
+            </div>
           )}
         </div>
       </div>
@@ -606,13 +763,14 @@ function Inventory() {
             <table className={`w-full table-fixed border ${theme === 'dark' ? 'bg-gray-900 border-gray-700' : 'bg-white border-gray-300'}`}>
               <thead className={theme === 'dark' ? 'bg-gray-800' : 'bg-gray-100'}>
                 <tr>
-                  <th className={`px-3 py-2 text-right border ${theme === 'dark' ? 'border-gray-700' : 'border-gray-300'}`}>البيان</th>
+                  <th className={`px-3 py-2 text-right border w-auto min-w-0 ${theme === 'dark' ? 'border-gray-700' : 'border-gray-300'}`}>البيان</th>
                   <th className={`px-3 py-2 text-right border ${theme === 'dark' ? 'border-gray-700' : 'border-gray-300'}`}>الكمية</th>
                   <th className={`px-3 py-2 text-right border ${theme === 'dark' ? 'border-gray-700' : 'border-gray-300'}`}>عدد الأتواب</th>
                   <th className={`px-3 py-2 text-right border ${theme === 'dark' ? 'border-gray-700' : 'border-gray-300'}`}>الوحدة</th>
-                  <th className={`px-3 py-2 text-right border ${theme === 'dark' ? 'border-gray-700' : 'border-gray-300'}`}>سعر الوحدة</th>
+                  {!isPriceHiddenForCurrentSection && (
+                    <th className={`px-3 py-2 text-right border transition-all duration-300 ${theme === 'dark' ? 'border-gray-700' : 'border-gray-300'}`}>سعر الوحدة</th>
+                  )}
                   <th className={`px-3 py-2 text-right border ${theme === 'dark' ? 'border-gray-700' : 'border-gray-300'}`}>الحالة</th>
-                  <th className={`px-3 py-2 text-right border ${theme === 'dark' ? 'border-gray-700' : 'border-gray-300'}`}>الإجراءات</th>
             </tr>
           </thead>
           <tbody>
@@ -621,18 +779,14 @@ function Inventory() {
               const status = meters <= 0 ? { text: 'منتهي', color: 'text-red-500' } : (meters <= notificationThreshold && notificationThreshold > 0 ? { text: 'منخفض', color: 'text-yellow-500' } : { text: 'متاح', color: 'text-green-500' })
               const displayName = `${item.item_name || 'صنف'}${item.color_number ? ' - رقم ' + item.color_number : ''}`
               return (
-                <tr key={item.id} data-row-id={item.id}>
-                  <td className={`px-3 py-2 border ${theme === 'dark' ? 'border-gray-800' : 'border-gray-300'}`}>{displayName}</td>
-                  <td className={`px-3 py-2 text-center border ${theme === 'dark' ? 'border-gray-800' : 'border-gray-300'}`}>{formatNumber(item.total_meters ?? 0)}</td>
-                  <td className={`px-3 py-2 text-center border ${theme === 'dark' ? 'border-gray-800' : 'border-gray-300'}`}>{item.rolls_count ? formatNumber(item.rolls_count) : '-'}</td>
-                  <td className={`px-3 py-2 text-center border ${theme === 'dark' ? 'border-gray-800' : 'border-gray-300'}`}>{item.unit || 'متر'}</td>
-                  <td className={`px-3 py-2 text-center border ${theme === 'dark' ? 'border-gray-800' : 'border-gray-300'}`}>{formatNumber(item.purchase_price ?? 0)}</td>
-                  <td className={`px-3 py-2 text-center border ${theme === 'dark' ? 'border-gray-800' : 'border-gray-300'} ${status.color}`}>{status.text}</td>
-                  <td className={`px-3 py-2 border ${theme === 'dark' ? 'border-gray-800' : 'border-gray-300'}`}>
-                  <div className="flex items-center gap-2">
+                <tr key={item.id} data-row-id={item.id} className={theme === 'dark' ? 'hover:bg-gray-800/50' : 'hover:bg-gray-50'}>
+                  <td className={`px-3 py-2 border align-middle ${theme === 'dark' ? 'border-gray-800' : 'border-gray-300'}`}>
+                    <div className="flex items-center gap-3 flex-wrap">
+                      <span className={`flex-1 min-w-0 break-words font-medium ${theme === 'dark' ? 'text-gray-100' : 'text-gray-900'}`}>{displayName}</span>
+                      <div className={`flex items-center gap-1 flex-shrink-0 rounded-lg p-1.5 ${theme === 'dark' ? 'bg-white/10' : 'bg-black/5'}`}>
                         <button
                           onClick={() => openDetails(item)}
-                          className="p-2 rounded text-green-500 hover:text-green-600"
+                          className="p-2 rounded-md text-green-600 hover:bg-green-500/20 transition-colors"
                           title="رؤية التفاصيل"
                         >
                           <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -640,28 +794,38 @@ function Inventory() {
                             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
                           </svg>
                         </button>
-                    <button
-                      onClick={() => openModal(item)}
-                      className="p-2 rounded text-blue-500 hover:text-blue-600"
-                      title="تعديل"
-                      aria-label="تعديل"
-                    >
+                        <button
+                          onClick={() => openModal(item)}
+                          className="p-2 rounded-md text-blue-600 hover:bg-blue-500/20 transition-colors"
+                          title="تعديل"
+                          aria-label="تعديل"
+                        >
                           <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536M4 20h4l9.768-9.768a2.5 2.5 0 10-3.536-3.536L4 16v4z" />
-                      </svg>
-                    </button>
-                    <button
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536M4 20h4l9.768-9.768a2.5 2.5 0 10-3.536-3.536L4 16v4z" />
+                          </svg>
+                        </button>
+                        <button
                           onClick={() => requestDelete(item.id)}
-                      className="p-2 rounded text-red-500 hover:text-red-600"
-                      title="حذف"
-                      aria-label="حذف"
-                    >
+                          className="p-2 rounded-md text-red-600 hover:bg-red-500/20 transition-colors"
+                          title="حذف"
+                          aria-label="حذف"
+                        >
                           <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6M9 7V4a1 1 0 011-1h4a1 1 0 011 1v3m-9 0h10" />
-                      </svg>
-                    </button>
-                  </div>
-                </td>
+                          </svg>
+                        </button>
+                      </div>
+                    </div>
+                  </td>
+                  <td className={`px-3 py-2 text-center border ${theme === 'dark' ? 'border-gray-800' : 'border-gray-300'}`}>{formatNumber(item.total_meters ?? 0)}</td>
+                  <td className={`px-3 py-2 text-center border ${theme === 'dark' ? 'border-gray-800' : 'border-gray-300'}`}>{item.rolls_count ? formatNumber(item.rolls_count) : '-'}</td>
+                  <td className={`px-3 py-2 text-center border ${theme === 'dark' ? 'border-gray-800' : 'border-gray-300'}`}>{item.unit || 'متر'}</td>
+                  {!isPriceHiddenForCurrentSection && (
+                    <td className={`px-3 py-2 text-center border transition-all duration-300 ${theme === 'dark' ? 'border-gray-800' : 'border-gray-300'}`}>
+                      {formatNumber(item.purchase_price ?? 0)}
+                    </td>
+                  )}
+                  <td className={`px-3 py-2 text-center border ${theme === 'dark' ? 'border-gray-800' : 'border-gray-300'} ${status.color}`}>{status.text}</td>
               </tr>
               )
             })}

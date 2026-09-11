@@ -1,6 +1,8 @@
 const Database = require("better-sqlite3");
 const path = require("path");
 const fs = require("fs");
+const ProfitLossService = require("./profitLoss");
+const AccountArchiveService = require("./accountArchive");
 
 let dbPath;
 
@@ -601,6 +603,13 @@ class DatabaseManager {
 
     this.ensureReturnedOrdersTable();
 
+    // أعمدة الأرشفة للعملاء والموردين (إضافة فقط، لا تمس أي بيانات مالية)
+    try {
+      this.getAccountArchiveService().ensureSchema();
+    } catch (error) {
+      console.error("تعذر تجهيز أعمدة الأرشفة:", error.message);
+    }
+
     const usersRow = this.db
       .prepare("SELECT COUNT(*) as count FROM users")
       .get();
@@ -635,8 +644,44 @@ class DatabaseManager {
     this.db.prepare("DELETE FROM users WHERE id = ?").run(id);
   }
 
-  getAllCustomers() {
-    return this.db.prepare("SELECT * FROM customers ORDER BY id DESC").all();
+  getAccountArchiveService() {
+    if (!this._accountArchiveService) {
+      this._accountArchiveService = new AccountArchiveService(this.db);
+    }
+    return this._accountArchiveService;
+  }
+
+  /**
+   * قائمة العملاء (بيانات أساسية فقط).
+   * status: active (افتراضي) | archived | all
+   * الأرشفة تخص قائمة الحسابات فقط ولا علاقة لها بأي كشف حساب أو إحصائية.
+   */
+  getAllCustomers(status = "active") {
+    return this.getAccountArchiveService().listCustomers(status);
+  }
+
+  archiveCustomer(id, options = {}) {
+    return this.getAccountArchiveService().archiveCustomer(id, options);
+  }
+
+  restoreCustomer(id) {
+    return this.getAccountArchiveService().restoreCustomer(id);
+  }
+
+  archiveSupplier(id, options = {}) {
+    return this.getAccountArchiveService().archiveSupplier(id, options);
+  }
+
+  restoreSupplier(id) {
+    return this.getAccountArchiveService().restoreSupplier(id);
+  }
+
+  assertCustomerActive(id, name) {
+    return this.getAccountArchiveService().assertCustomerActive(id, name);
+  }
+
+  assertSupplierActive(id, name) {
+    return this.getAccountArchiveService().assertSupplierActive(id, name);
   }
 
   getCustomerByNameAndPhone(name, phone) {
@@ -694,7 +739,8 @@ class DatabaseManager {
       return {
         exists: true,
         customer: duplicate,
-        hasPhone: !!(duplicate.phone && duplicate.phone.trim())
+        hasPhone: !!(duplicate.phone && duplicate.phone.trim()),
+        isArchived: Number(duplicate.is_active ?? 1) === 0
       };
     }
 
@@ -768,29 +814,10 @@ class DatabaseManager {
   }
 
   getCustomerStats(id) {
-    const customer = this.getCustomerById(id);
-    if (!customer) return null;
-
-    const customerName = customer.name;
-
-    // عدد المبيعات
-    const salesCount = this.db.prepare("SELECT COUNT(*) as count FROM sales WHERE TRIM(LOWER(customer_name)) = TRIM(LOWER(?))").get(customerName)?.count || 0;
-
-    // عدد الدفعات
     this.ensurePaymentsTable();
-    const paymentsCount = this.db.prepare("SELECT COUNT(*) as count FROM payments WHERE TRIM(LOWER(customer_name)) = TRIM(LOWER(?))").get(customerName)?.count || 0;
-
-    // عدد الأوردرات الراجعة
     this.ensureReturnedOrdersTable();
-    const returnedOrdersCount = this.db.prepare("SELECT COUNT(*) as count FROM returned_orders WHERE TRIM(LOWER(customer_name)) = TRIM(LOWER(?))").get(customerName)?.count || 0;
-
-    return {
-      customer,
-      salesCount,
-      paymentsCount,
-      returnedOrdersCount,
-      totalRecords: salesCount + paymentsCount + returnedOrdersCount
-    };
+    // ملخص الحساب مبني على المعاملات نفسها، وليس على حالة العميل (نشط/مؤرشف)
+    return this.getAccountArchiveService().getCustomerAccountSummary(id);
   }
 
   getInventoryById(id) {
@@ -816,37 +843,41 @@ class DatabaseManager {
       .run(newMeters, newRolls, inventoryId);
   }
 
+  /**
+   * حذف نهائي لبيانات العميل الأساسية فقط.
+   * لا يُسمح به إطلاقًا لو للعميل أي معاملات (بيع/دفعة/مرتجع)، لأن المعاملات
+   * سجلات محاسبية دائمة. في هذه الحالة الحل الصحيح هو الأرشفة.
+   */
   deleteCustomer(id) {
-    // الحصول على بيانات العميل قبل الحذف
-    const customer = this.getCustomerById(id);
-    if (!customer) return;
+    this.ensurePaymentsTable();
+    this.ensureReturnedOrdersTable();
 
-    const customerName = customer.name;
+    const summary = this.getAccountArchiveService().getCustomerAccountSummary(id);
+    if (!summary) {
+      const error = new Error("العميل غير موجود");
+      error.code = "NOT_FOUND";
+      throw error;
+    }
 
-    // حذف جميع البيانات المرتبطة بالعميل باستخدام transaction للأمان
-    const deleteTransaction = this.db.transaction(() => {
-      // حذف المبيعات
-      this.db.prepare("DELETE FROM sales WHERE TRIM(LOWER(customer_name)) = TRIM(LOWER(?))").run(customerName);
-      
-      // حذف الدفعات
-      this.ensurePaymentsTable();
-      this.db.prepare("DELETE FROM payments WHERE TRIM(LOWER(customer_name)) = TRIM(LOWER(?))").run(customerName);
-      
-      // حذف الأوردرات الراجعة
-      this.ensureReturnedOrdersTable();
-      this.db.prepare("DELETE FROM returned_orders WHERE TRIM(LOWER(customer_name)) = TRIM(LOWER(?))").run(customerName);
-      
-      // حذف العميل نفسه
-      this.db.prepare("DELETE FROM customers WHERE id = ?").run(id);
-    });
+    if (summary.hasTransactions) {
+      const error = new Error(
+        `لا يمكن حذف العميل "${summary.customer.name}" لأن له ${summary.totalRecords} معاملة مسجلة. استخدم الأرشفة للحفاظ على السجل المالي.`
+      );
+      error.code = "HAS_TRANSACTIONS";
+      error.summary = summary;
+      throw error;
+    }
 
-    deleteTransaction();
+    this.db.prepare("DELETE FROM customers WHERE id = ?").run(Number(summary.customer.id));
+    return { deleted: true, id: Number(summary.customer.id) };
   }
 
-  getAllSuppliers() {
-    return this.db
-      .prepare("SELECT * FROM suppliers_info ORDER BY id DESC")
-      .all();
+  /**
+   * قائمة الموردين (بيانات أساسية فقط).
+   * status: active (افتراضي) | archived | all
+   */
+  getAllSuppliers(status = "active") {
+    return this.getAccountArchiveService().listSuppliers(status);
   }
 
   getSupplierById(id) {
@@ -856,22 +887,9 @@ class DatabaseManager {
   }
 
   getSupplierStats(id) {
-    const supplier = this.getSupplierById(id);
-    if (!supplier) return null;
-
-    const supplierName = supplier.name;
-
-    const ordersCount = this.db.prepare("SELECT COUNT(*) as count FROM suppliers WHERE TRIM(LOWER(name)) = TRIM(LOWER(?))").get(supplierName)?.count || 0;
-
     this.ensureSupplierPaymentsTable();
-    const paymentsCount = this.db.prepare("SELECT COUNT(*) as count FROM supplier_payments WHERE TRIM(LOWER(supplier_name)) = TRIM(LOWER(?))").get(supplierName)?.count || 0;
-
-    return {
-      supplier,
-      ordersCount,
-      paymentsCount,
-      totalRecords: ordersCount + paymentsCount
-    };
+    // ملخص الحساب مبني على المعاملات نفسها، وليس على حالة المورد (نشط/مؤرشف)
+    return this.getAccountArchiveService().getSupplierAccountSummary(id);
   }
 
   checkDuplicateSupplier(name, phone, excludeId = null) {
@@ -904,7 +922,8 @@ class DatabaseManager {
       return {
         exists: true,
         supplier: duplicate,
-        hasPhone: !!(duplicate.phone && duplicate.phone.trim())
+        hasPhone: !!(duplicate.phone && duplicate.phone.trim()),
+        isArchived: Number(duplicate.is_active ?? 1) === 0
       };
     }
 
@@ -1201,57 +1220,32 @@ class DatabaseManager {
     tx();
   }
 
+  /**
+   * حذف نهائي لبيانات المورد الأساسية فقط.
+   * ممنوع لو للمورد أي أوردرات أو دفعات، لأن المشتريات وتكلفة المخزون التاريخية
+   * مبنية عليها. البديل الصحيح هو الأرشفة.
+   */
   deleteSupplier(id) {
-    try {
-      const supplier = this.db
-        .prepare("SELECT name FROM suppliers_info WHERE id = ?")
-        .get(id);
-      
-      if (!supplier) {
-        throw new Error("المورد غير موجود");
-      }
+    this.ensureSupplierPaymentsTable();
 
-      const tx = this.db.transaction(() => {
-        try {
-          if (this.tableExists("supplier_transactions")) {
-            this.db
-              .prepare("DELETE FROM supplier_transactions WHERE supplier_name = ?")
-              .run(supplier.name);
-          }
-        } catch (e) {
-          console.warn("Could not delete supplier_transactions:", e.message);
-        }
-
-        try {
-          this.db
-            .prepare("DELETE FROM suppliers WHERE name = ?")
-            .run(supplier.name);
-        } catch (e) {
-          console.warn("Could not delete supplier orders:", e.message);
-        }
-
-        try {
-          this.db
-            .prepare("DELETE FROM supplier_payments WHERE supplier_name = ?")
-            .run(supplier.name);
-        } catch (e) {
-          console.warn("Could not delete supplier payments:", e.message);
-        }
-
-        try {
-          this.db.prepare("DELETE FROM suppliers_info WHERE id = ?").run(id);
-        } catch (e) {
-          console.warn("Could not delete supplier info:", e.message);
-          throw e;
-        }
-      });
-
-      tx();
-      console.log(`Successfully deleted supplier: ${supplier.name}`);
-    } catch (error) {
-      console.error("Error in deleteSupplier:", error);
+    const summary = this.getAccountArchiveService().getSupplierAccountSummary(id);
+    if (!summary) {
+      const error = new Error("المورد غير موجود");
+      error.code = "NOT_FOUND";
       throw error;
     }
+
+    if (summary.hasTransactions) {
+      const error = new Error(
+        `لا يمكن حذف المورد "${summary.supplier.name}" لأن له ${summary.totalRecords} معاملة مسجلة. استخدم الأرشفة للحفاظ على السجل المالي.`
+      );
+      error.code = "HAS_TRANSACTIONS";
+      error.summary = summary;
+      throw error;
+    }
+
+    this.db.prepare("DELETE FROM suppliers_info WHERE id = ?").run(Number(summary.supplier.id));
+    return { deleted: true, id: Number(summary.supplier.id) };
   }
 
   deleteSupplierOrder(id) {
@@ -1324,6 +1318,24 @@ class DatabaseManager {
       .prepare("SELECT COUNT(*) as count FROM suppliers_info")
       .get();
     stats.totalSuppliers = suppliersCount.count;
+
+    // أعداد إضافية للعرض فقط: كل الأرقام المالية تحت تبقى محسوبة من المعاملات
+    try {
+      const archive = this.getAccountArchiveService();
+      if (archive.columnExists("suppliers_info", "is_active")) {
+        stats.activeSuppliers =
+          this.db
+            .prepare("SELECT COUNT(*) as count FROM suppliers_info WHERE COALESCE(is_active, 1) = 1")
+            .get().count || 0;
+        stats.archivedSuppliers = stats.totalSuppliers - stats.activeSuppliers;
+      } else {
+        stats.activeSuppliers = stats.totalSuppliers;
+        stats.archivedSuppliers = 0;
+      }
+    } catch {
+      stats.activeSuppliers = stats.totalSuppliers;
+      stats.archivedSuppliers = 0;
+    }
 
     // Calculate totals from supplier_transactions if available
     if (this.tableExists("supplier_transactions")) {
@@ -2138,10 +2150,62 @@ class DatabaseManager {
     }
   }
 
+  /**
+   * طبقة حساب الأرباح والخسائر (أساس الاستحقاق) - للقراءة فقط.
+   * كل الحسابات تُنفَّذ في الـbackend ولا تعتمد على أي قيمة مرسلة من الواجهة.
+   */
+  getProfitLossService() {
+    if (!this._profitLossService) {
+      this._profitLossService = new ProfitLossService(this.db);
+    }
+    return this._profitLossService;
+  }
+
+  /**
+   * تقرير الأرباح والخسائر لفترة محددة.
+   * @param {{from?: string|null, to?: string|null, includeDetails?: boolean}} options
+   */
+  getProfitLoss(options = {}) {
+    const isoDate = (value) => {
+      if (!value) return null;
+      const text = String(value).trim();
+      return /^\d{4}-\d{2}-\d{2}$/.test(text) ? text : null;
+    };
+    let from = isoDate(options.from);
+    let to = isoDate(options.to);
+    if (from && to && from > to) {
+      const swap = from;
+      from = to;
+      to = swap;
+    }
+    return this.getProfitLossService().calculateProfitLoss({
+      from,
+      to,
+      includeDetails: options.includeDetails !== false,
+    });
+  }
+
+  /** ملخّص التسوية بين الإيراد والتحصيل لفترة محددة */
+  getProfitLossReconciliation(options = {}) {
+    const pl = this.getProfitLoss({ ...options, includeDetails: true });
+    return {
+      period: pl.period,
+      netSales: pl.netSales,
+      collections: pl.collections,
+      allocatedCollections: pl.allocatedCollections,
+      unallocatedCollections: pl.unallocatedCollections,
+      accountsReceivable: pl.accountsReceivable,
+      collectionsVsRevenueDifference:
+        Math.round((pl.collections - pl.netSales) * 100) / 100,
+      warnings: pl.reconciliationWarnings,
+    };
+  }
+
   getDefaultStatistics() {
     console.log("إرجاع إحصائيات افتراضية بسبب خطأ في قاعدة البيانات");
     return {
       customersCount: 0, suppliersCount: 0, inventoryCount: 0, sectionsCount: 0,
+      activeCustomersCount: 0, archivedCustomersCount: 0, activeSuppliersCount: 0, archivedSuppliersCount: 0,
       customersTotal: 0, customersPaid: 0, customersRemaining: 0, customersCreditTotal: 0, customersWithRemaining: 0,
       suppliersTotal: 0, suppliersPaid: 0, suppliersRemaining: 0, suppliersCreditTotal: 0, suppliersOrdersCount: 0,
       inventoryTotalMeters: 0, inventoryTotalKilos: 0,
@@ -2153,6 +2217,9 @@ class DatabaseManager {
       netIncome: 0, netProfit: 0, netLoss: 0, costOfSoldItems: 0, costOfReturned: 0, netCostOfSoldItems: 0,
       totalSalesPaid: 0, totalSuppliersPaid: 0,
       lowInventoryItems: [], topSelling: [],
+      profitLoss: null, profitLossPeriods: {},
+      collections: 0, allocatedCollections: 0, unallocatedCollections: 0, accountsReceivable: 0,
+      collectionRate: 0, reconciliationWarnings: [],
       averageSaleValue: 0, averageExpenseValue: 0, paymentRate: 0, profitMargin: 0, grossProfit: 0, grossProfitMargin: 0
     };
   }
@@ -2227,6 +2294,9 @@ class DatabaseManager {
           return this.getDefaultStatistics();
         }
       }
+
+      // طبقة حساب الأرباح والخسائر على أساس الاستحقاق (قراءة فقط)
+      const profitLossService = this.getProfitLossService();
 
       this.ensureSalesTable();
       this.ensureExpensesTable();
@@ -2859,25 +2929,16 @@ class DatabaseManager {
         )
         .all(yr.year, yr.year, yr.year);
 
-      // حساب الأرباح والخسائر حسب السنة
-      const costOfSoldItemsYear = this.db
-        .prepare(`
-        SELECT COALESCE(SUM(s.unit_cost * s.quantity), 0) as cost
-        FROM sales s
-        WHERE s.unit_cost > 0 AND strftime('%Y', s.date) = ?
-      `)
-        .get(yr.year).cost || 0;
+      // حساب الأرباح والخسائر حسب السنة (أساس الاستحقاق - Accrual Basis)
+      const plYear = profitLossService.calculateProfitLoss({
+        from: `${yr.year}-01-01`,
+        to: `${yr.year}-12-31`,
+        includeDetails: false,
+      });
 
-      const costOfReturnedYear = netSalesYear > 0
-        ? returnedYearTotal * (costOfSoldItemsYear / (salesYear.total || 1))
-        : 0;
-      const netCostOfSoldItemsYear = Math.max(0, costOfSoldItemsYear - costOfReturnedYear);
-
-      const grossProfitYear = netSalesYear - netCostOfSoldItemsYear;
-      const grossProfitMarginYear = netSalesYear > 0 ? (grossProfitYear / netSalesYear) * 100 : 0;
-      const netIncomeYear = netSalesYear - netCostOfSoldItemsYear - expensesYear.outside + expensesYear.inside;
+      const netIncomeYear = plYear.netProfit;
       const netProfitYear = netIncomeYear > 0 ? netIncomeYear : 0;
-      const netLossYear = netIncomeYear < 0 ? Math.abs(netIncomeYear) : 0;
+      const netLossYear = plYear.netLoss;
 
       statsByYear[yr.year] = {
         sales: {
@@ -2910,12 +2971,17 @@ class DatabaseManager {
           netIncome: netIncomeYear,
           netProfit: netProfitYear,
           netLoss: netLossYear,
-          grossProfit: grossProfitYear,
-          grossProfitMargin: grossProfitMarginYear,
-          costOfSoldItems: costOfSoldItemsYear,
-          costOfReturned: costOfReturnedYear,
-          netCostOfSoldItems: netCostOfSoldItemsYear,
+          grossProfit: plYear.grossProfit,
+          grossProfitMargin: plYear.grossProfitMargin || 0,
+          costOfSoldItems: plYear.cogs,
+          costOfReturned: plYear.returnedCogs,
+          netCostOfSoldItems: plYear.netCogs,
+          // حقول توافق مع الإصدارات السابقة
+          fullNetCostOfSoldItems: plYear.netCogs,
+          cashRevenue: plYear.collections,
+          recognitionRate: 1,
         },
+        profitLoss: plYear,
       };
     }
 
@@ -2974,16 +3040,53 @@ class DatabaseManager {
         )
         .get().sum || 0;
 
-    const costOfSoldItems = this.db.prepare(`
-      SELECT COALESCE(SUM(s.unit_cost * s.quantity), 0) as cost
-      FROM sales s
-      WHERE s.unit_cost > 0
-    `).get().cost || 0;
+    // ---------------------------------------------------------------------
+    // الأرباح والخسائر على أساس الاستحقاق (Accrual Basis)
+    // الإيراد = المبيعات بعد المرتجعات، وليس المبالغ المحصّلة.
+    // ---------------------------------------------------------------------
+    const profitLossAll = profitLossService.calculateProfitLoss({
+      from: null,
+      to: null,
+      includeDetails: true,
+    });
+    // حدود الفترات تُبنى من التاريخ المحلي مباشرة لتجنّب انزياح المنطقة الزمنية
+    const plNow = new Date();
+    const plToday = new Date().toISOString().split("T")[0];
+    const plWeekStart = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000)
+      .toISOString()
+      .split("T")[0];
+    const plMonthStart = `${plNow.getFullYear()}-${String(
+      plNow.getMonth() + 1
+    ).padStart(2, "0")}-01`;
+    const plYearStart = `${plNow.getFullYear()}-01-01`;
 
-    const costOfReturned = salesTotal > 0
-      ? returnedTotal * (costOfSoldItems / salesTotal)
-      : 0;
-    const netCostOfSoldItems = Math.max(0, costOfSoldItems - costOfReturned);
+    const profitLossPeriods = {
+      all: profitLossAll,
+      today: profitLossService.calculateProfitLoss({
+        from: plToday,
+        to: plToday,
+        includeDetails: false,
+      }),
+      week: profitLossService.calculateProfitLoss({
+        from: plWeekStart,
+        to: plToday,
+        includeDetails: false,
+      }),
+      month: profitLossService.calculateProfitLoss({
+        from: plMonthStart,
+        to: plToday,
+        includeDetails: false,
+      }),
+      year: profitLossService.calculateProfitLoss({
+        from: plYearStart,
+        to: plToday,
+        includeDetails: false,
+      }),
+    };
+
+    const costOfSoldItems = profitLossAll.cogs;
+    const costOfReturned = profitLossAll.returnedCogs;
+    const netCostOfSoldItemsFull = profitLossAll.netCogs;
 
     if (!this.tableExists("supplier_transactions")) {
       const suppliersPaidActual =
@@ -2999,9 +3102,13 @@ class DatabaseManager {
       totalSuppliersPaid = suppliersPaidActual + supplierPaymentsPaid;
     }
 
-    const netIncome = netSalesTotal - netCostOfSoldItems - expensesOutside + expensesInside;
+    // صافي الربح على أساس الاستحقاق:
+    // صافي المبيعات - صافي تكلفة البضاعة - المصروفات التشغيلية + الإيرادات الأخرى
+    // التحصيلات النقدية لا تدخل هذه المعادلة إطلاقاً.
+    const netCostOfSoldItems = profitLossAll.netCogs;
+    const netIncome = profitLossAll.netProfit;
     const netProfit = netIncome > 0 ? netIncome : 0;
-    const netLoss = netIncome < 0 ? Math.abs(netIncome) : 0;
+    const netLoss = profitLossAll.netLoss;
 
     // Check for low inventory items
     const lowInventoryItems =
@@ -3014,8 +3121,37 @@ class DatabaseManager {
     // Backward-compatible key expected by frontend
     const suppliersPaid = totalSuppliersPaid;
 
+    // أعداد الحسابات النشطة/المؤرشفة: للعرض فقط، ولا تدخل في أي حساب مالي
+    let activeCustomersCount = customersCount;
+    let archivedCustomersCount = 0;
+    let activeSuppliersCount = suppliersCount;
+    let archivedSuppliersCount = 0;
+    try {
+      const archive = this.getAccountArchiveService();
+      if (archive.columnExists("customers", "is_active")) {
+        activeCustomersCount =
+          this.db
+            .prepare("SELECT COUNT(*) as count FROM customers WHERE COALESCE(is_active, 1) = 1")
+            .get().count || 0;
+        archivedCustomersCount = customersCount - activeCustomersCount;
+      }
+      if (archive.columnExists("suppliers_info", "is_active")) {
+        activeSuppliersCount =
+          this.db
+            .prepare("SELECT COUNT(*) as count FROM suppliers_info WHERE COALESCE(is_active, 1) = 1")
+            .get().count || 0;
+        archivedSuppliersCount = suppliersCount - activeSuppliersCount;
+      }
+    } catch (error) {
+      console.warn("تعذر حساب أعداد الحسابات المؤرشفة:", error.message);
+    }
+
     return {
       customersCount,
+      activeCustomersCount,
+      archivedCustomersCount,
+      activeSuppliersCount,
+      archivedSuppliersCount,
       customersWithRemaining,
       // إجمالي مبالغ باقية للعملاء (كائتمان لصالحهم)
       customersCreditTotal,
@@ -3109,6 +3245,19 @@ class DatabaseManager {
       costOfSoldItems,
       costOfReturned,
       netCostOfSoldItems,
+      // تقرير الأرباح والخسائر الكامل (أساس الاستحقاق) + نفس التقرير لكل فترة
+      profitLoss: profitLossAll,
+      profitLossPeriods,
+      accountsReceivable: profitLossAll.accountsReceivable,
+      allocatedCollections: profitLossAll.allocatedCollections,
+      unallocatedCollections: profitLossAll.unallocatedCollections,
+      collections: profitLossAll.collections,
+      collectionRate: profitLossAll.collectionRate,
+      reconciliationWarnings: profitLossAll.reconciliationWarnings,
+      // حقول توافق مع الإصدارات السابقة (لم تُحذف حتى لا تنكسر أي شاشة)
+      fullNetCostOfSoldItems: netCostOfSoldItemsFull,
+      cashRevenue: profitLossAll.collections,
+      recognitionRate: 1,
       totalSalesPaid,
       totalSuppliersPaid,
       expensesInside,
@@ -3123,15 +3272,18 @@ class DatabaseManager {
         expensesCount > 0
           ? (expensesInside + expensesOutside) / expensesCount
           : 0,
-      paymentRate: netSalesTotal > 0 ? (salesPaid / netSalesTotal) * 100 : 0,
-      profitMargin: netSalesTotal > 0 ? (netIncome / netSalesTotal) * 100 : 0,
-      grossProfit: netSalesTotal - netCostOfSoldItems,
-      grossProfitMargin: netSalesTotal > 0 ? ((netSalesTotal - netCostOfSoldItems) / netSalesTotal) * 100 : 0,
+      // نسبة التحصيل مؤشر نقدي منفصل ولا تدخل في أي معادلة ربح
+      paymentRate: profitLossAll.collectionRate || 0,
+      // الهوامش تُحسب على صافي المبيعات (Net Sales) وليس على التحصيل
+      profitMargin: profitLossAll.netProfitMargin || 0,
+      grossProfit: profitLossAll.grossProfit,
+      grossProfitMargin: profitLossAll.grossProfitMargin || 0,
     };
     } catch (error) {
       console.error("Error in getStatistics:", error);
       return {
         customersCount: 0, suppliersCount: 0, inventoryCount: 0, sectionsCount: 0,
+        activeCustomersCount: 0, archivedCustomersCount: 0, activeSuppliersCount: 0, archivedSuppliersCount: 0,
         customersTotal: 0, customersPaid: 0, customersRemaining: 0, customersCreditTotal: 0, customersWithRemaining: 0,
         suppliersTotal: 0, suppliersPaid: 0, suppliersRemaining: 0, suppliersCreditTotal: 0, suppliersOrdersCount: 0,
         inventoryTotalMeters: 0, inventoryTotalKilos: 0,

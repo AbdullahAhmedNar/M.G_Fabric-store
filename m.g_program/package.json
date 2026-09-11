@@ -1,6 +1,6 @@
 {
   "name": "mg-fabric-store",
-  "version": "2.0.7",
+  "version": "2.2.0",
   "description": "M.G - Fabric Store Management System - Complete Profit/Loss Calculation System",
   "main": "electron/main.js",
   "author": "M.G Systems",
@@ -19,6 +19,26 @@
     "sqlite"
   ],
   "changelog": {
+    "2.2.0": [
+      "✅ أرشفة حسابات العملاء والموردين بدون حذف المعاملات التاريخية",
+      "✅ كشف الحساب والإحصائيات والأرباح والخسائر تفضل على المعاملات حتى بعد الأرشفة",
+      "✅ منع الحذف النهائي لأي حساب عليه معاملات مالية",
+      "✅ تبويب نشط / أرشيف / الكل مع عداد للحسابات المؤرشفة",
+      "✅ صافي الربح والخسارة محسوب على قيمة الأوردر مش على المبلغ المحصّل",
+      "✅ إصلاح تكرار كروت ملخص المكسب والخسارة"
+    ],
+    "2.1.0": [
+      "✅ إعادة بناء نظام الأرباح والخسائر على أساس الاستحقاق (Accrual Basis)",
+      "✅ الإيراد أصبح من المبيعات بعد المرتجعات وليس من المبالغ المحصّلة",
+      "✅ تكلفة البضاعة المباعة لم تعد تتأثر بنسبة التحصيل",
+      "✅ تكلفة البضاعة المرتجعة تُحسب من التكلفة التاريخية الفعلية للصنف",
+      "✅ فصل التحصيلات النقدية عن الإيراد وإظهار التحصيلات غير المخصّصة",
+      "✅ إضافة مديونيات العملاء (Accounts Receivable) ونسبة التحصيل كمؤشر منفصل",
+      "✅ إضافة ملاحظات تسوية ومراجعة تكشف مشاكل البيانات بدون تعديلها",
+      "✅ إعادة تصميم صفحة الإحصائيات إلى قائمة أرباح وخسائر من 7 أقسام",
+      "✅ إضافة فترة مخصّصة (من تاريخ إلى تاريخ) لتقرير الأرباح والخسائر",
+      "✅ تصدير Excel يتضمن قائمة الأرباح والخسائر الكاملة وملاحظات التسوية"
+    ],
     "2.0.7": [
       "✅ إضافة بحث في قسم أكثر الأصناف مبيعاً (قسم/صنف)",
       "✅ جعل قيم الأكثر مبيعاً صافية بعد خصم الأوردرات المرتجعة",
@@ -98,6 +118,11 @@
     "dist:clean": "npm run build:force && electron-builder --publish=never",
     "dist:win": "npm run build && electron-builder --win --x64",
     "server": "node server/index.js",
+    "test:profit-loss": "node scripts/pl-tests.js",
+    "test:profit-loss:regression": "node scripts/pl-regression.js",
+    "audit:profit-loss": "node scripts/pl-baseline.js",
+    "test:archive": "node scripts/archive-tests.js",
+    "audit:archive": "node scripts/archive-baseline.js",
     "reset-db": "node -e \"const db = require('./server/database'); const dbManager = new db(); dbManager.resetDatabase(); console.log('Database reset successfully');\"",
     "rebuild": "npx electron-rebuild",
     "rebuild:sqlite3": "cd node_modules/better-sqlite3 && npm run build-release",
@@ -159,7 +184,8 @@
         "ar",
         "en"
       ],
-      "language": "1033"
+      "language": "1033",
+      "artifactName": "MG-Fabric-Store-Setup-${version}.${ext}"
     },
     "files": [
       "dist/**/*",
@@ -176,15 +202,6 @@
           "**/*"
         ]
       }
-    ],
-    "extraResources": [
-      {
-        "from": "server/mg_fabric.db",
-        "to": "mg_fabric.db"
-      }
-    ],
-    "asarUnpack": [
-      "**/mg_fabric.db"
     ]
   }
 }

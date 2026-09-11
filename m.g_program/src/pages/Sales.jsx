@@ -4,6 +4,7 @@ import { useTheme } from '../context/ThemeContext'
 import { useNotification } from '../context/NotificationContext'
 import { exportSalesToExcel } from '../utils/exportExcel'
 import ConfirmDialog from '../components/ConfirmDialog'
+import SearchableSelect from '../components/SearchableSelect'
 import { formatNumber, formatDateToDisplay, parseDisplayDateToISO } from '../utils/format'
 import { apiUrl } from '../utils/api'
 import SalesDetails from '../components/SalesDetails'
@@ -17,6 +18,7 @@ function Sales() {
   const [paymentsTotalSum, setPaymentsTotalSum] = useState(0)
   const [customersBalance, setCustomersBalance] = useState({ remaining: 0, creditTotal: 0 })
   const [searchTerm, setSearchTerm] = useState('')
+  const [isStatsHidden, setIsStatsHidden] = useState(true)
   const [showModal, setShowModal] = useState(false)
   const [editingId, setEditingId] = useState(null)
   const [showDetails, setShowDetails] = useState(false)
@@ -34,7 +36,8 @@ function Sales() {
     unit: 'متر',
     price: '',
     paid: '',
-    date: new Date().toISOString().split('T')[0]
+    date: new Date().toISOString().split('T')[0],
+    rolls_sold: ''
   })
   const [orderItems, setOrderItems] = useState([])
   const [currentItem, setCurrentItem] = useState({
@@ -44,21 +47,31 @@ function Sales() {
     quantity: '',
     unit: 'متر',
     price: '',
-    paid: ''
+    paid: '',
+    rolls_sold: ''
   })
+  const [editingOrderItemId, setEditingOrderItemId] = useState(null)
+  const [editingOrderItemBackup, setEditingOrderItemBackup] = useState(null)
+  const [editingOrderItemIndex, setEditingOrderItemIndex] = useState(null)
   const [showInvoice, setShowInvoice] = useState(false)
   const [invoiceData, setInvoiceData] = useState(null)
   const [systemSettings, setSystemSettings] = useState({
-    storeName: 'M.G Fabric Store',
+    storeName: 'M.G FASHION FABRIC',
     storeAddress: 'عنوان المتجر',
     storePhone: 'رقم الهاتف'
   })
-  const [dateInputValue, setDateInputValue] = useState('')
   const { appName } = useTheme()
 
-  useEffect(() => {
-    setDateInputValue(formatDateToDisplay(formData.date))
-  }, [formData.date])
+  const createEmptyCurrentItem = () => ({
+    description: '',
+    fromInventory: false,
+    inventory_item_id: '',
+    quantity: '',
+    unit: 'متر',
+    price: '',
+    paid: '',
+    rolls_sold: ''
+  })
 
   useEffect(() => {
     fetchSales()
@@ -109,7 +122,7 @@ function Sales() {
       const data = await res.json()
       if (data) {
         setSystemSettings({
-          storeName: data.app_name || appName || 'M.G Fabric Store',
+          storeName: data.app_name || appName || 'M.G FASHION FABRIC',
           storeAddress: data.storeAddress || 'عنوان المتجر',
           storePhone: data.storePhone || 'رقم الهاتف'
         })
@@ -258,7 +271,8 @@ function Sales() {
         unit: sale.unit || 'متر',
         price: sale.price,
         paid: sale.paid,
-        date: sale.date
+        date: sale.date,
+        rolls_sold: sale.rolls_sold != null ? sale.rolls_sold : ''
       })
       
       // تحديد القسم المختار مسبقاً عند التعديل
@@ -269,15 +283,7 @@ function Sales() {
         }
       }
       setOrderItems([])
-      setCurrentItem({
-        description: '',
-        fromInventory: false,
-        inventory_item_id: '',
-        quantity: '',
-        unit: 'متر',
-        price: '',
-        paid: ''
-      })
+      setCurrentItem(createEmptyCurrentItem())
     } else {
       setEditingId(null)
       setFormData({
@@ -289,37 +295,30 @@ function Sales() {
         unit: 'متر',
         price: '',
         paid: '',
-        date: new Date().toISOString().split('T')[0]
+        date: new Date().toISOString().split('T')[0],
+        rolls_sold: ''
       })
       setSelectedSectionId('')
       setOrderItems([])
-      setCurrentItem({
-        description: '',
-        fromInventory: false,
-        inventory_item_id: '',
-        quantity: '',
-        unit: 'متر',
-        price: '',
-        paid: ''
-      })
+      setCurrentItem(createEmptyCurrentItem())
     }
+    setEditingOrderItemId(null)
+    setEditingOrderItemBackup(null)
+    setEditingOrderItemIndex(null)
     setShowModal(true)
   }
 
   const closeModal = () => {
+    // استعادة المخزون من الخادم عند إغلاق/إلغاء المودال لضمان صحة الكميات
+    fetchInventory()
     setShowModal(false)
     setEditingId(null)
     setSelectedSectionId('')
     setOrderItems([])
-    setCurrentItem({
-      description: '',
-      fromInventory: false,
-      inventory_item_id: '',
-      quantity: '',
-      unit: 'متر',
-      price: '',
-      paid: ''
-    })
+    setCurrentItem(createEmptyCurrentItem())
+    setEditingOrderItemId(null)
+    setEditingOrderItemBackup(null)
+    setEditingOrderItemIndex(null)
   }
 
   const openDetails = (sale) => {
@@ -330,6 +329,75 @@ function Sales() {
   const closeDetails = () => {
     setShowDetails(false)
     setSelectedSale(null)
+  }
+
+  const startEditOrderItem = (item) => {
+    if (editingOrderItemId !== null) return
+
+    const itemIndex = orderItems.findIndex((i) => i.id === item.id)
+    if (itemIndex === -1) return
+
+    // استرجاع الكمية للمخزون محلياً قبل التعديل
+    if (item.fromInventory && item.inventory_item_id) {
+      setInventory(prev => prev.map(inv =>
+        inv.id == item.inventory_item_id
+          ? { ...inv, total_meters: (inv.total_meters || 0) + (item.quantity || 0) }
+          : inv
+      ))
+    }
+
+    setEditingOrderItemId(item.id)
+    setEditingOrderItemBackup(item)
+    setEditingOrderItemIndex(itemIndex)
+    setOrderItems(prev => prev.filter(i => i.id !== item.id))
+
+    setCurrentItem({
+      description: item.description || '',
+      fromInventory: !!item.fromInventory,
+      inventory_item_id: item.inventory_item_id || '',
+      quantity: item.quantity ?? '',
+      unit: item.unit || 'متر',
+      price: item.price ?? '',
+      paid: item.paid ?? '',
+      rolls_sold: item.rolls_sold ?? ''
+    })
+
+    if (item.inventory_item_id) {
+      const selectedInvItem = inventory.find(i => i.id == item.inventory_item_id)
+      setSelectedSectionId(selectedInvItem?.section_id ? String(selectedInvItem.section_id) : '')
+    } else {
+      setSelectedSectionId('')
+    }
+  }
+
+  const cancelEditOrderItem = () => {
+    if (!editingOrderItemBackup) return
+
+    // إعادة الصنف القديم للقائمة
+    setOrderItems(prev => {
+      const next = [...prev]
+      const insertAt = editingOrderItemIndex != null ? Math.min(editingOrderItemIndex, next.length) : next.length
+      next.splice(insertAt, 0, editingOrderItemBackup)
+      return next
+    })
+
+    // إعادة خصم الكمية القديمة من المخزون كما كانت قبل بدء التعديل
+    if (editingOrderItemBackup.fromInventory && editingOrderItemBackup.inventory_item_id) {
+      setInventory(prev => prev.map(inv =>
+        inv.id == editingOrderItemBackup.inventory_item_id
+          ? {
+              ...inv,
+              total_meters: Math.max(0, (inv.total_meters || 0) - (editingOrderItemBackup.quantity || 0))
+            }
+          : inv
+      ))
+    }
+
+    setEditingOrderItemId(null)
+    setEditingOrderItemBackup(null)
+    setEditingOrderItemIndex(null)
+    setCurrentItem(createEmptyCurrentItem())
+    setSelectedSectionId('')
   }
 
   const addItemToOrder = () => {
@@ -344,8 +412,18 @@ function Sales() {
 
     if (currentItem.fromInventory && currentItem.inventory_item_id) {
       const selectedItem = inventory.find(i => i.id == currentItem.inventory_item_id)
+      const rollsSoldRaw = currentItem.rolls_sold
+      const rollsSold = parseInt(rollsSoldRaw, 10)
+      if (rollsSoldRaw === '' || rollsSoldRaw == null || Number.isNaN(rollsSold) || rollsSold <= 0) {
+        addNotification('يجب إدخال عدد الأتواب (رقم أكبر من صفر) قبل إضافة الصنف', 'error')
+        return
+      }
       if (!selectedItem || quantity > selectedItem.total_meters) {
         addNotification(`الكمية غير متوفرة في المخزون. المتاح: ${selectedItem?.total_meters || 0} ${selectedItem?.unit || 'متر'} فقط`, 'error')
+        return
+      }
+      if (rollsSold > 0 && selectedItem.rolls_count != null && rollsSold > (selectedItem.rolls_count || 0)) {
+        addNotification(`عدد الأتواب المدخل (${rollsSold}) أكبر من المتاح في المخزون (${selectedItem.rolls_count || 0})`, 'error')
         return
       }
     }
@@ -358,23 +436,46 @@ function Sales() {
       price,
       total,
       paid,
-      id: Date.now()
+      id: editingOrderItemId ?? Date.now()
     }
 
-    setOrderItems([...orderItems, newItem])
-    setCurrentItem({
-      description: '',
-      fromInventory: false,
-      inventory_item_id: '',
-      quantity: '',
-      unit: 'متر',
-      price: '',
-      paid: ''
-    })
+    if (editingOrderItemId !== null) {
+      setOrderItems(prev => {
+        const next = [...prev]
+        const insertAt = editingOrderItemIndex != null ? Math.min(editingOrderItemIndex, next.length) : next.length
+        next.splice(insertAt, 0, newItem)
+        return next
+      })
+    } else {
+      setOrderItems([...orderItems, newItem])
+    }
+
+    // تحديث الكمية المتاحة في المخزون فوراً (محلياً) حتى لا يُسحب نفس الكمية مرتين
+    if (currentItem.fromInventory && currentItem.inventory_item_id) {
+      setInventory(prev => prev.map(inv =>
+        inv.id == currentItem.inventory_item_id
+          ? { ...inv, total_meters: Math.max(0, (inv.total_meters || 0) - quantity) }
+          : inv
+      ))
+    }
+
+    setCurrentItem(createEmptyCurrentItem())
+    setEditingOrderItemId(null)
+    setEditingOrderItemBackup(null)
+    setEditingOrderItemIndex(null)
     setSelectedSectionId('')
   }
 
   const removeItemFromOrder = (itemId) => {
+    const itemToRemove = orderItems.find(item => item.id === itemId)
+    // استرجاع الكمية للمخزون المحلي عند إزالة الصنف من القائمة
+    if (itemToRemove?.fromInventory && itemToRemove?.inventory_item_id) {
+      setInventory(prev => prev.map(inv =>
+        inv.id == itemToRemove.inventory_item_id
+          ? { ...inv, total_meters: (inv.total_meters || 0) + (itemToRemove.quantity || 0) }
+          : inv
+      ))
+    }
     setOrderItems(orderItems.filter(item => item.id !== itemId))
   }
 
@@ -401,6 +502,12 @@ function Sales() {
       if (formData.fromInventory && formData.inventory_item_id) {
       const oldSale = sales.find(s => s.id === editingId)
       const selectedItem = inventory.find(i => i.id == formData.inventory_item_id)
+      const rollsSoldRequired = parseInt(formData.rolls_sold, 10)
+
+      if (formData.rolls_sold === '' || formData.rolls_sold == null || Number.isNaN(rollsSoldRequired) || rollsSoldRequired <= 0) {
+        addNotification('عدد الأتواب مطلوب ولا يمكن تركه فارغًا', 'error')
+        return
+      }
       
       const availableQuantity = (selectedItem?.total_meters || 0) + 
         (oldSale?.inventory_item_id === formData.inventory_item_id ? (oldSale?.quantity || 0) : 0)
@@ -409,9 +516,18 @@ function Sales() {
         addNotification(`الكمية غير متوفرة في المخزون. المتاح: ${availableQuantity.toFixed(2)} ${selectedItem?.unit || 'متر'} فقط`, 'error')
         return
       }
+      const rollsSoldVal = formData.rolls_sold != null && formData.rolls_sold !== '' ? parseInt(formData.rolls_sold, 10) : 0
+      if (rollsSoldVal > 0) {
+        const availableRolls = (selectedItem?.rolls_count || 0) + (parseInt(oldSale?.rolls_sold, 10) || 0)
+        if (rollsSoldVal > availableRolls) {
+          addNotification(`عدد الأتواب (${rollsSoldVal}) أكبر من المتاح (${availableRolls})`, 'error')
+          return
+        }
+      }
     }
 
-    const payload = { ...formData, quantity, price, paid, total, remaining }
+    const rollsSoldVal = formData.rolls_sold != null && formData.rolls_sold !== '' ? parseInt(formData.rolls_sold, 10) : null
+    const payload = { ...formData, quantity, price, paid, total, remaining, rolls_sold: !isNaN(rollsSoldVal) && rollsSoldVal > 0 ? rollsSoldVal : null }
     console.log('Sales payload:', payload)
 
     try {
@@ -430,7 +546,8 @@ function Sales() {
         window.dispatchEvent(new CustomEvent('updateStatistics'))
         closeModal()
       } else {
-        addNotification('فشل الحفظ - كود الخطأ: ' + res.status, 'error')
+        const errData = await res.json().catch(() => null)
+        addNotification(errData?.message || 'فشل الحفظ - كود الخطأ: ' + res.status, 'error')
       }
     } catch (e) {
       console.error('Sales error:', e)
@@ -449,12 +566,16 @@ function Sales() {
       try {
         // إذا وُجد مبلغ في "المبلغ المدفوع" يُوزَّع على الأصناف. وإلا نستخدم مسدد كل صنف على حدة.
         const paidPerItem = paidAsTotal > 0 ? paidAsTotal / n : 0
+        const orderGroupId = `order_${Date.now()}`
 
         const promises = orderItems.map(async (item, i) => {
           const itemPaid = paidAsTotal > 0
             ? (i === n - 1 ? paidAsTotal - paidPerItem * (n - 1) : paidPerItem)
             : (parseFloat(item.paid) || 0)
           const itemRemaining = (item.total || 0) - itemPaid
+          const invItem = item.inventory_item_id ? inventory.find(inv => inv.id == item.inventory_item_id) : null
+          const sectionId = invItem?.section_id || null
+          const rollsSold = item.rolls_sold != null && item.rolls_sold !== '' ? parseInt(item.rolls_sold, 10) : null
 
           const payload = {
             customer_name: formData.customer_name,
@@ -467,7 +588,10 @@ function Sales() {
             paid: itemPaid,
             total: item.total,
             remaining: itemRemaining,
-            date: formData.date
+            date: formData.date,
+            order_group_id: orderGroupId,
+            section_id: sectionId,
+            rolls_sold: !isNaN(rollsSold) && rollsSold > 0 ? rollsSold : null
           }
           
           const res = await fetch(apiUrl('/api/sales'), {
@@ -477,7 +601,8 @@ function Sales() {
           })
           
           if (!res.ok) {
-            throw new Error(`فشل في حفظ الصنف: ${item.description}`)
+            const errData = await res.json().catch(() => null)
+            throw new Error(errData?.message || `فشل في حفظ الصنف: ${item.description}`)
           }
           
           return res.json()
@@ -587,6 +712,10 @@ function Sales() {
     }
   }
 
+  const toggleStatsVisibility = () => {
+    setIsStatsHidden(prev => !prev)
+  }
+
   return (
     <div>
       <div className="flex justify-between items-center mb-6">
@@ -623,7 +752,26 @@ function Sales() {
             </div>
           </div>
         </div>
-        <div className="flex gap-2">
+        <div className="flex gap-2 items-center flex-wrap justify-end">
+          <button
+            type="button"
+            onClick={toggleStatsVisibility}
+            className={`flex items-center gap-2 px-3 py-2 rounded-full text-sm font-semibold border backdrop-blur-sm transition ${
+              theme === 'dark'
+                ? 'border-camel/40 text-camel bg-black/30 hover:bg-black/50'
+                : 'border-brown/30 text-brown bg-white/70 hover:bg-white'
+            }`}
+            title={isStatsHidden ? 'إظهار الإحصائيات أعلى الصفحة' : 'إخفاء الإحصائيات أعلى الصفحة'}
+          >
+            <span className="relative w-7 h-4 rounded-full bg-gray-300 dark:bg-gray-700 overflow-hidden">
+              <span
+                className={`absolute top-[2px] w-3 h-3 rounded-full bg-green-500 shadow-sm transform transition-transform duration-300 ${
+                  isStatsHidden ? 'translate-x-[2px] bg-red-500' : 'translate-x-[14px]'
+                }`}
+              />
+            </span>
+            <span>{isStatsHidden ? 'الإحصائيات مخفية' : 'إظهار/إخفاء الإحصائيات'}</span>
+          </button>
           <button
             onClick={handleExport}
             className="flex items-center gap-2 px-4 py-3 bg-brown text-white rounded-lg font-semibold hover:brightness-110 transition"
@@ -661,6 +809,8 @@ function Sales() {
         />
       </div>
 
+      {!isStatsHidden && (
+        <>
       <div className={`grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-7 gap-4 mb-4`}>
         <div className={`p-4 rounded-lg ${theme === 'dark' ? 'bg-gray-900' : 'bg-gray-100'}`}>
           <p className="text-sm text-gray-500">إجمالي المبيعات</p>
@@ -739,6 +889,8 @@ function Sales() {
           </div>
         </div>
       )}
+        </>
+      )}
 
       <div className="overflow-x-auto">
         <table className={`w-full table-fixed border ${theme === 'dark' ? 'bg-gray-900 border-gray-700' : 'bg-white border-gray-300'}`}>
@@ -796,8 +948,10 @@ function Sales() {
                         )}
                       </div>
                     </td>
-                    <td className={`px-3 py-2 border ${theme === 'dark' ? 'border-gray-800' : 'border-gray-300'}`}>
-                      {customerSales[0].description}
+                    <td className={`px-3 py-2 border max-w-[220px] ${theme === 'dark' ? 'border-gray-800' : 'border-gray-300'}`}>
+                      <p className="truncate" title={customerSales[0].description || 'بدون وصف'}>
+                        {customerSales[0].description || 'بدون وصف'}
+                      </p>
                     </td>
                     <td className={`px-3 py-2 text-center border ${theme === 'dark' ? 'border-gray-800' : 'border-gray-300'}`}>
                       {customerSales[0].quantity} {customerSales[0].unit || 'متر'}
@@ -845,8 +999,10 @@ function Sales() {
                       <td className={`px-3 py-2 border ${theme === 'dark' ? 'border-gray-800' : 'border-gray-300'}`}>
                         {/* Empty cell for customer name column */}
                       </td>
-                      <td className={`px-3 py-2 border ${theme === 'dark' ? 'border-gray-800' : 'border-gray-300'} pl-8`}>
-                        <span className="text-sm text-gray-500">• {sale.description || 'بدون وصف'}</span>
+                      <td className={`px-3 py-2 border max-w-[220px] ${theme === 'dark' ? 'border-gray-800' : 'border-gray-300'} pl-8`}>
+                        <span className="text-sm text-gray-500 block truncate" title={sale.description || 'بدون وصف'}>
+                          • {sale.description || 'بدون وصف'}
+                        </span>
                       </td>
                       <td className={`px-3 py-2 text-center border ${theme === 'dark' ? 'border-gray-800' : 'border-gray-300'}`}>
                         {sale.quantity} {sale.unit || 'متر'}
@@ -918,18 +1074,9 @@ function Sales() {
                 <div>
                   <label className={`block text-sm font-semibold mb-1 ${theme === 'dark' ? 'text-gray-300' : 'text-gray-700'}`}>التاريخ</label>
                   <input
-                    type="text"
-                    dir="rtl"
-                    inputMode="numeric"
-                    placeholder="2026/1/29"
-                    value={dateInputValue}
-                    onChange={(e) => {
-                      setDateInputValue(e.target.value)
-                      const iso = parseDisplayDateToISO(e.target.value)
-                      if (iso) setFormData((prev) => ({ ...prev, date: iso }))
-                      else if (e.target.value === '') setFormData((prev) => ({ ...prev, date: '' }))
-                    }}
-                    onBlur={() => setDateInputValue(formatDateToDisplay(formData.date))}
+                    type="date"
+                    value={formData.date}
+                    onChange={(e) => setFormData((prev) => ({ ...prev, date: e.target.value }))}
                     className={`w-full px-3 py-2 rounded ${theme === 'dark' ? 'bg-gray-800 text-white' : 'bg-gray-100 text-gray-900'}`}
                     required
                   />
@@ -1021,34 +1168,40 @@ function Sales() {
                 <>
                   <div>
                     <label className={`block text-sm font-semibold mb-1 ${theme === 'dark' ? 'text-gray-300' : 'text-gray-700'}`}>اختر القسم</label>
-                    <select
+                    <SearchableSelect
+                      options={sections.map(s => ({ value: s.id, label: s.name }))}
                       value={selectedSectionId}
-                      onChange={(e) => { setSelectedSectionId(e.target.value); setFormData({ ...formData, inventory_item_id: '', quantity: '' }) }}
-                      className={`w-full px-3 py-2 rounded ${theme === 'dark' ? 'bg-gray-800 text-white' : 'bg-gray-100 text-gray-900'}`}
+                      onChange={(v) => { setSelectedSectionId(v); setFormData({ ...formData, inventory_item_id: '', quantity: '' }) }}
+                      placeholder="اختر القسم"
+                      searchPlaceholder="بحث عن قسم..."
                       required={formData.fromInventory}
-                    >
-                      <option value="">اختر القسم</option>
-                      {sections.map(s => (
-                        <option key={s.id} value={s.id}>{s.name}</option>
-                      ))}
-                    </select>
+                    />
                   </div>
                   {selectedSectionId && (
                   <div>
                     <label className={`block text-sm font-semibold mb-1 ${theme === 'dark' ? 'text-gray-300' : 'text-gray-700'}`}>اختر المنتج</label>
-                  <select
-                    value={formData.inventory_item_id}
-                    onChange={(e) => setFormData({ ...formData, inventory_item_id: e.target.value, quantity: '' })}
-                    className={`w-full px-3 py-2 rounded ${theme === 'dark' ? 'bg-gray-800 text-white' : 'bg-gray-100 text-gray-900'}`}
-                    required={formData.fromInventory}
-                  >
-                      <option value="">اختر المنتج من القسم</option>
-                      {inventory.filter(i => String(i.section_id) === String(selectedSectionId)).map(item => (
-                      <option key={item.id} value={item.id}>
-                          {item.item_name || item.color_number} {item.color_number && item.item_name ? `- رقم ${item.color_number}` : ''} (متاح: {item.total_meters} {item.unit || 'متر'})
-                      </option>
-                    ))}
-                  </select>
+                    <SearchableSelect
+                      optionSearchKeys={['item_name', 'color_number']}
+                      options={inventory.filter(i => String(i.section_id) === String(selectedSectionId)).map(item => ({
+                        value: item.id,
+                        label: `${item.item_name || item.color_number}${item.color_number && item.item_name ? ' - رقم ' + item.color_number : ''} (متاح: ${item.total_meters} ${item.unit || 'متر'})`,
+                        item_name: item.item_name,
+                        color_number: item.color_number
+                      }))}
+                      value={formData.inventory_item_id}
+                      onChange={(v) => {
+                        const selectedItem = inventory.find(i => String(i.id) === String(v))
+                        setFormData({
+                          ...formData,
+                          inventory_item_id: v,
+                          quantity: '',
+                          description: selectedItem?.item_name || selectedItem?.color_number || formData.description || ''
+                        })
+                      }}
+                      placeholder="اختر المنتج من القسم"
+                      searchPlaceholder="بحث بالاسم أو الرقم..."
+                      required={formData.fromInventory}
+                    />
                   </div>
                   )}
                   {formData.inventory_item_id && (() => {
@@ -1121,20 +1274,44 @@ function Sales() {
               <input
                 type="number"
                 step="0.01"
-                placeholder="المسدّد"
+                placeholder="مبلغ"
                 value={formData.paid}
                 onChange={(e) => setFormData({ ...formData, paid: e.target.value })}
-                className={`w-full px-3 py-2 rounded ${theme === 'dark' ? 'bg-gray-800 text-white' : 'bg-gray-100 text-gray-900'}`}
+                className={`w-full px-3 py-2 rounded placeholder:text-xs ${theme === 'dark' ? 'bg-gray-800 text-white' : 'bg-gray-100 text-gray-900'}`}
                 required
               />
               </div>
+              {formData.fromInventory && formData.inventory_item_id && (() => {
+                const sel = inventory.find(i => i.id == formData.inventory_item_id)
+                const avail = sel?.rolls_count != null ? parseInt(sel.rolls_count, 10) : 0
+                return (
+                  <div>
+                    <label className={`block text-sm font-semibold mb-1 ${theme === 'dark' ? 'text-gray-300' : 'text-gray-700'}`}>عدد الأتواب المباعة</label>
+                    <input
+                      type="number"
+                      min="1"
+                      step="1"
+                      placeholder={avail ? `مطلوب - المتاح ${avail}` : 'مطلوب'}
+                      value={formData.rolls_sold ?? ''}
+                      onChange={(e) => {
+                        const v = e.target.value === '' ? '' : Math.max(0, parseInt(e.target.value, 10) || 0)
+                        setFormData({ ...formData, rolls_sold: v })
+                      }}
+                      className={`w-full px-3 py-2 rounded placeholder:text-xs ${theme === 'dark' ? 'bg-gray-800 text-white' : 'bg-gray-100 text-gray-900'}`}
+                      required
+                    />
+                  </div>
+                )
+              })()}
                 </>
               ) : (
                 // إضافة أصناف متعددة (الطريقة الجديدة)
                 <>
                   {/* إضافة صنف جديد */}
                   <div className={`p-4 rounded-lg ${theme === 'dark' ? 'bg-gray-800' : 'bg-gray-50'}`}>
-                    <h4 className={`text-lg font-semibold mb-3 ${theme === 'dark' ? 'text-camel' : 'text-brown'}`}>إضافة صنف جديد</h4>
+                    <h4 className={`text-lg font-semibold mb-3 ${theme === 'dark' ? 'text-camel' : 'text-brown'}`}>
+                      {editingOrderItemId !== null ? 'تعديل الصنف' : 'إضافة صنف جديد'}
+                    </h4>
                     
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div>
@@ -1166,34 +1343,42 @@ function Sales() {
                       <>
                         <div className="mt-3">
                           <label className={`block text-sm font-semibold mb-1 ${theme === 'dark' ? 'text-gray-300' : 'text-gray-700'}`}>اختر القسم</label>
-                          <select
+                          <SearchableSelect
+                            options={sections.map(s => ({ value: s.id, label: s.name }))}
                             value={selectedSectionId}
-                            onChange={(e) => { setSelectedSectionId(e.target.value); setCurrentItem({ ...currentItem, inventory_item_id: '', quantity: '' }) }}
-                            className={`w-full px-3 py-2 rounded ${theme === 'dark' ? 'bg-gray-700 text-white' : 'bg-white text-gray-900'}`}
+                            onChange={(v) => { setSelectedSectionId(v); setCurrentItem({ ...currentItem, inventory_item_id: '', quantity: '' }) }}
+                            placeholder="اختر القسم"
+                            searchPlaceholder="بحث عن قسم..."
+                            className={theme === 'dark' ? 'bg-gray-700' : 'bg-white'}
                             required={currentItem.fromInventory}
-                          >
-                            <option value="">اختر القسم</option>
-                            {sections.map(s => (
-                              <option key={s.id} value={s.id}>{s.name}</option>
-                            ))}
-                          </select>
+                          />
                         </div>
                         {selectedSectionId && (
                         <div className="mt-3">
                           <label className={`block text-sm font-semibold mb-1 ${theme === 'dark' ? 'text-gray-300' : 'text-gray-700'}`}>اختر المنتج</label>
-                        <select
-                          value={currentItem.inventory_item_id}
-                          onChange={(e) => setCurrentItem({ ...currentItem, inventory_item_id: e.target.value, quantity: '' })}
-                          className={`w-full px-3 py-2 rounded ${theme === 'dark' ? 'bg-gray-700 text-white' : 'bg-white text-gray-900'}`}
-                          required={currentItem.fromInventory}
-                        >
-                            <option value="">اختر المنتج من القسم</option>
-                            {inventory.filter(i => String(i.section_id) === String(selectedSectionId)).map(item => (
-                            <option key={item.id} value={item.id}>
-                                {item.item_name || item.color_number} {item.color_number && item.item_name ? `- رقم ${item.color_number}` : ''} (متاح: {item.total_meters} {item.unit || 'متر'})
-                            </option>
-                          ))}
-                        </select>
+                          <SearchableSelect
+                            optionSearchKeys={['item_name', 'color_number']}
+                            options={inventory.filter(i => String(i.section_id) === String(selectedSectionId)).map(item => ({
+                              value: item.id,
+                              label: `${item.item_name || item.color_number}${item.color_number && item.item_name ? ' - رقم ' + item.color_number : ''} (متاح: ${item.total_meters} ${item.unit || 'متر'})`,
+                              item_name: item.item_name,
+                              color_number: item.color_number
+                            }))}
+                            value={currentItem.inventory_item_id}
+                            onChange={(v) => {
+                              const selectedItem = inventory.find(i => String(i.id) === String(v))
+                              setCurrentItem({
+                                ...currentItem,
+                                inventory_item_id: v,
+                                quantity: '',
+                                description: selectedItem?.item_name || selectedItem?.color_number || currentItem.description || ''
+                              })
+                            }}
+                            placeholder="اختر المنتج من القسم"
+                            searchPlaceholder="بحث بالاسم أو الرقم..."
+                            className={theme === 'dark' ? 'bg-gray-700' : 'bg-white'}
+                            required={currentItem.fromInventory}
+                          />
                         </div>
                         )}
                         {currentItem.inventory_item_id && (() => {
@@ -1266,21 +1451,54 @@ function Sales() {
                         <input
                           type="number"
                           step="0.01"
-                          placeholder="المبلغ المسدد لهذا الصنف"
+                          placeholder="مبلغ"
                           value={currentItem.paid}
                           onChange={(e) => setCurrentItem({ ...currentItem, paid: e.target.value })}
-                          className={`w-full px-3 py-2 rounded ${theme === 'dark' ? 'bg-gray-700 text-white' : 'bg-white text-gray-900'}`}
+                          className={`w-full px-3 py-2 rounded placeholder:text-xs ${theme === 'dark' ? 'bg-gray-700 text-white' : 'bg-white text-gray-900'}`}
                         />
                       </div>
                     </div>
+
+                    {currentItem.fromInventory && currentItem.inventory_item_id && (() => {
+                      const sel = inventory.find(i => i.id == currentItem.inventory_item_id)
+                      const avail = sel?.rolls_count != null ? parseInt(sel.rolls_count, 10) : 0
+                      return (
+                        <div className="mt-3">
+                          <label className={`block text-sm font-semibold mb-1 ${theme === 'dark' ? 'text-gray-300' : 'text-gray-700'}`}>عدد الأتواب المباعة</label>
+                          <input
+                            type="number"
+                            min="1"
+                            step="1"
+                            placeholder={avail ? `مطلوب - المتاح ${avail} توب` : 'مطلوب'}
+                            value={currentItem.rolls_sold}
+                            onChange={(e) => {
+                              const v = e.target.value === '' ? '' : Math.max(0, parseInt(e.target.value, 10) || 0)
+                              setCurrentItem({ ...currentItem, rolls_sold: v })
+                            }}
+                            className={`w-full px-3 py-2 rounded placeholder:text-xs ${theme === 'dark' ? 'bg-gray-700 text-white' : 'bg-white text-gray-900'}`}
+                            required
+                          />
+                          {avail > 0 && <p className={`text-xs mt-1 ${theme === 'dark' ? 'text-gray-400' : 'text-gray-500'}`}>سيُخصم من عدد الأتواب في المخزون</p>}
+                        </div>
+                      )
+                    })()}
 
                     <button
                       type="button"
                       onClick={addItemToOrder}
                       className={`w-full mt-4 py-2 rounded font-semibold ${theme === 'dark' ? 'bg-camel text-black' : 'bg-brown text-white'}`}
                     >
-                      + إضافة الصنف للطلب
+                      {editingOrderItemId !== null ? 'حفظ تعديل الصنف' : '+ إضافة الصنف للطلب'}
                     </button>
+                    {editingOrderItemId !== null && (
+                      <button
+                        type="button"
+                        onClick={cancelEditOrderItem}
+                        className="w-full mt-2 py-2 rounded font-semibold bg-gray-500 text-white hover:bg-gray-600"
+                      >
+                        إلغاء التعديل
+                      </button>
+                    )}
                   </div>
 
                   {/* قائمة الأصناف المضافة */}
@@ -1322,16 +1540,28 @@ function Sales() {
                                   )}
                                 </div>
                               </div>
-                              <button
-                                type="button"
-                                onClick={() => removeItemFromOrder(item.id)}
-                                className="p-1 text-red-500 hover:text-red-700"
-                                title="حذف الصنف"
-                              >
-                                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6M9 7V4a1 1 0 011-1h4a1 1 0 011 1v3m-9 0h10" />
-                                </svg>
-                              </button>
+                              <div className="flex items-center gap-2">
+                                <button
+                                  type="button"
+                                  onClick={() => startEditOrderItem(item)}
+                                  className="p-1 text-blue-500 hover:text-blue-700"
+                                  title="تعديل الصنف"
+                                >
+                                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536M4 20h4l9.768-9.768a2.5 2.5 0 10-3.536-3.536L4 16v4z" />
+                                  </svg>
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => removeItemFromOrder(item.id)}
+                                  className="p-1 text-red-500 hover:text-red-700"
+                                  title="حذف الصنف"
+                                >
+                                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6M9 7V4a1 1 0 011-1h4a1 1 0 011 1v3m-9 0h10" />
+                                  </svg>
+                                </button>
+                              </div>
                             </div>
                           </div>
                         ))}
@@ -1358,10 +1588,10 @@ function Sales() {
                     <input
                       type="number"
                       step="0.01"
-                      placeholder="المبلغ الإجمالي المسدد (يُوزَّع)"
+                      placeholder="مبلغ"
                       value={formData.paid}
                       onChange={(e) => setFormData({ ...formData, paid: e.target.value })}
-                      className={`w-full px-3 py-2 rounded ${theme === 'dark' ? 'bg-gray-800 text-white' : 'bg-gray-100 text-gray-900'}`}
+                      className={`w-full px-3 py-2 rounded placeholder:text-xs ${theme === 'dark' ? 'bg-gray-800 text-white' : 'bg-gray-100 text-gray-900'}`}
                     />
                     {orderItems.length > 0 && (() => {
                       const totalPaid = (parseFloat(formData.paid) || 0) > 0 ? (parseFloat(formData.paid) || 0) : getOrderPaidTotal()
@@ -1456,6 +1686,8 @@ function Sales() {
       {showDetails && selectedSale && (
         <SalesDetails
           sale={selectedSale}
+          sections={sections}
+          inventory={inventory}
           onClose={closeDetails}
         />
       )}

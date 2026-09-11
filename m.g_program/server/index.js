@@ -117,8 +117,24 @@ app.delete("/api/users/:id", (req, res) => {
   }
 });
 
+// status: active (افتراضي) | archived | all
+const ACCOUNT_STATUSES = new Set(["active", "archived", "all"]);
+const parseAccountStatus = (value) => {
+  const status = String(value || "active").trim().toLowerCase();
+  return ACCOUNT_STATUSES.has(status) ? status : "active";
+};
+const parseAccountId = (value) => {
+  const id = Number.parseInt(String(value ?? "").trim(), 10);
+  return Number.isSafeInteger(id) && id > 0 ? id : null;
+};
+
 app.get("/api/customers", (req, res) => {
-  res.json(db.getAllCustomers());
+  try {
+    res.json(db.getAllCustomers(parseAccountStatus(req.query.status)));
+  } catch (error) {
+    console.error("Error fetching customers:", error);
+    res.status(500).json([]);
+  }
 });
 
 app.post("/api/customers", (req, res) => {
@@ -138,11 +154,14 @@ app.post("/api/customers", (req, res) => {
         message += ' (بدون رقم هاتف)';
       }
       
-      message += '. يرجى تغيير الاسم أو رقم الهاتف لتجنب التكرار.';
-      
+      message += duplicateCheck.isArchived
+        ? '. هذا الحساب موجود في الأرشيف — يمكنك استرجاعه بدل إضافته من جديد.'
+        : '. يرجى تغيير الاسم أو رقم الهاتف لتجنب التكرار.';
+
       return res.status(400).json({
         success: false,
         duplicate: true,
+        archived: !!duplicateCheck.isArchived,
         customer: {
           id: customer.id,
           name: customer.name,
@@ -186,7 +205,11 @@ app.put("/api/customers/:id", (req, res) => {
 
 app.get("/api/customers/:id/stats", (req, res) => {
   try {
-    const stats = db.getCustomerStats(parseInt(req.params.id));
+    const id = parseAccountId(req.params.id);
+    if (!id) {
+      return res.status(400).json({ success: false, message: "رقم العميل غير صالح" });
+    }
+    const stats = db.getCustomerStats(id);
     if (!stats) {
       return res.status(404).json({ success: false, message: "العميل غير موجود" });
     }
@@ -197,11 +220,72 @@ app.get("/api/customers/:id/stats", (req, res) => {
   }
 });
 
+// أرشفة عميل: إخفاؤه من الحسابات النشطة فقط، مع الاحتفاظ بكل معاملاته
+app.post("/api/customers/:id/archive", (req, res) => {
+  try {
+    const id = parseAccountId(req.params.id);
+    if (!id) {
+      return res.status(400).json({ success: false, message: "رقم العميل غير صالح" });
+    }
+    const allowOutstandingBalance = req.body?.allowOutstandingBalance === true;
+    const summary = db.archiveCustomer(id, { allowOutstandingBalance });
+    res.json({ success: true, summary });
+  } catch (error) {
+    if (error.code === "NOT_FOUND") {
+      return res.status(404).json({ success: false, message: error.message });
+    }
+    if (error.code === "OUTSTANDING_BALANCE") {
+      return res.status(409).json({
+        success: false,
+        code: error.code,
+        message: error.message,
+        balance: error.summary?.balance ?? 0,
+        balanceLabel: error.summary?.balanceLabel || "",
+      });
+    }
+    console.error("Error archiving customer:", error);
+    res.status(500).json({ success: false, message: "خطأ في أرشفة العميل" });
+  }
+});
+
+app.post("/api/customers/:id/restore", (req, res) => {
+  try {
+    const id = parseAccountId(req.params.id);
+    if (!id) {
+      return res.status(400).json({ success: false, message: "رقم العميل غير صالح" });
+    }
+    const summary = db.restoreCustomer(id);
+    res.json({ success: true, summary });
+  } catch (error) {
+    if (error.code === "NOT_FOUND") {
+      return res.status(404).json({ success: false, message: error.message });
+    }
+    console.error("Error restoring customer:", error);
+    res.status(500).json({ success: false, message: "خطأ في استرجاع العميل" });
+  }
+});
+
+// الحذف النهائي متاح فقط للعميل الذي ليس له أي معاملة. غير ذلك: أرشفة.
 app.delete("/api/customers/:id", (req, res) => {
   try {
-    db.deleteCustomer(req.params.id);
+    const id = parseAccountId(req.params.id);
+    if (!id) {
+      return res.status(400).json({ success: false, message: "رقم العميل غير صالح" });
+    }
+    db.deleteCustomer(id);
     res.json({ success: true });
   } catch (error) {
+    if (error.code === "NOT_FOUND") {
+      return res.status(404).json({ success: false, message: error.message });
+    }
+    if (error.code === "HAS_TRANSACTIONS") {
+      return res.status(409).json({
+        success: false,
+        code: error.code,
+        message: error.message,
+        totalRecords: error.summary?.totalRecords ?? 0,
+      });
+    }
     console.error("Error deleting customer:", error);
     res.status(500).json({ success: false, message: "خطأ في حذف العميل" });
   }
@@ -210,7 +294,7 @@ app.delete("/api/customers/:id", (req, res) => {
 // API endpoints للموردين (المعلومات الأساسية)
 app.get("/api/suppliers", (req, res) => {
   try {
-    const suppliers = db.getAllSuppliers();
+    const suppliers = db.getAllSuppliers(parseAccountStatus(req.query.status));
     if (!suppliers) {
       throw new Error("Failed to fetch suppliers");
     }
@@ -259,11 +343,14 @@ app.post("/api/suppliers", (req, res) => {
         message += ' (بدون رقم هاتف)';
       }
       
-      message += '. يرجى تغيير الاسم أو رقم الهاتف لتجنب التكرار.';
-      
+      message += duplicateCheck.isArchived
+        ? '. هذا الحساب موجود في الأرشيف — يمكنك استرجاعه بدل إضافته من جديد.'
+        : '. يرجى تغيير الاسم أو رقم الهاتف لتجنب التكرار.';
+
       return res.status(400).json({
         success: false,
         duplicate: true,
+        archived: !!duplicateCheck.isArchived,
         supplier: {
           id: supplier.id,
           name: supplier.name,
@@ -298,7 +385,11 @@ app.put("/api/suppliers/:id", (req, res) => {
 
 app.get("/api/suppliers/:id/stats", (req, res) => {
   try {
-    const stats = db.getSupplierStats(parseInt(req.params.id));
+    const id = parseAccountId(req.params.id);
+    if (!id) {
+      return res.status(400).json({ success: false, message: "رقم المورد غير صالح" });
+    }
+    const stats = db.getSupplierStats(id);
     if (!stats) {
       return res.status(404).json({ success: false, message: "المورد غير موجود" });
     }
@@ -309,29 +400,77 @@ app.get("/api/suppliers/:id/stats", (req, res) => {
   }
 });
 
-app.delete("/api/suppliers/:id", (req, res) => {
+// أرشفة مورد: إخفاؤه من الحسابات النشطة فقط، مع الاحتفاظ بكل مشترياته ودفعاته
+app.post("/api/suppliers/:id/archive", (req, res) => {
   try {
-    const id = req.params.id;
-    console.log(`Attempting to delete supplier with ID: ${id}`);
-    
-    // Check if supplier exists first
-    const supplier = db.getSupplierById(id);
-    if (!supplier) {
-      return res.status(404).json({ 
-        success: false, 
-        message: "المورد غير موجود" 
+    const id = parseAccountId(req.params.id);
+    if (!id) {
+      return res.status(400).json({ success: false, message: "رقم المورد غير صالح" });
+    }
+    const allowOutstandingBalance = req.body?.allowOutstandingBalance === true;
+    const summary = db.archiveSupplier(id, { allowOutstandingBalance });
+    res.json({ success: true, summary });
+  } catch (error) {
+    if (error.code === "NOT_FOUND") {
+      return res.status(404).json({ success: false, message: error.message });
+    }
+    if (error.code === "OUTSTANDING_BALANCE") {
+      return res.status(409).json({
+        success: false,
+        code: error.code,
+        message: error.message,
+        balance: error.summary?.balance ?? 0,
+        balanceLabel: error.summary?.balanceLabel || "",
       });
     }
-    
+    console.error("Error archiving supplier:", error);
+    res.status(500).json({ success: false, message: "خطأ في أرشفة المورد" });
+  }
+});
+
+app.post("/api/suppliers/:id/restore", (req, res) => {
+  try {
+    const id = parseAccountId(req.params.id);
+    if (!id) {
+      return res.status(400).json({ success: false, message: "رقم المورد غير صالح" });
+    }
+    const summary = db.restoreSupplier(id);
+    res.json({ success: true, summary });
+  } catch (error) {
+    if (error.code === "NOT_FOUND") {
+      return res.status(404).json({ success: false, message: error.message });
+    }
+    console.error("Error restoring supplier:", error);
+    res.status(500).json({ success: false, message: "خطأ في استرجاع المورد" });
+  }
+});
+
+// الحذف النهائي متاح فقط للمورد الذي ليس له أي معاملة. غير ذلك: أرشفة.
+app.delete("/api/suppliers/:id", (req, res) => {
+  try {
+    const id = parseAccountId(req.params.id);
+    if (!id) {
+      return res.status(400).json({ success: false, message: "رقم المورد غير صالح" });
+    }
     db.deleteSupplier(id);
-    console.log(`Successfully deleted supplier: ${supplier.name}`);
     res.json({ success: true });
   } catch (error) {
+    if (error.code === "NOT_FOUND") {
+      return res.status(404).json({ success: false, message: error.message });
+    }
+    if (error.code === "HAS_TRANSACTIONS") {
+      return res.status(409).json({
+        success: false,
+        code: error.code,
+        message: error.message,
+        totalRecords: error.summary?.totalRecords ?? 0,
+      });
+    }
     console.error("Error deleting supplier:", error);
-    res.status(500).json({ 
-      success: false, 
+    res.status(500).json({
+      success: false,
       message: "خطأ في حذف المورد",
-      error: error.message 
+      error: error.message,
     });
   }
 });
@@ -344,10 +483,14 @@ app.get("/api/supplier-orders", (req, res) => {
 app.post("/api/supplier-orders", (req, res) => {
   try {
     console.log("Adding supplier order:", req.body);
+    db.assertSupplierActive(req.body?.supplier_id, req.body?.name || req.body?.supplier_name);
     const id = db.addSupplierOrder(req.body);
     console.log("Successfully added supplier order with ID:", id);
     res.json({ success: true, id });
   } catch (error) {
+    if (error && error.code === "ARCHIVED_ACCOUNT") {
+      return res.status(409).json({ success: false, code: error.code, message: error.message });
+    }
     console.error("Error adding supplier order:", error);
     res.status(500).json({ 
       success: false, 
@@ -453,6 +596,36 @@ app.get("/api/inventory/sections", (req, res) => {
 app.get("/api/inventory/section/:sectionId", (req, res) => {
   const { sectionId } = req.params;
   res.json(db.getInventoryBySection(sectionId));
+});
+
+app.get("/api/inventory/:id/sales", (req, res) => {
+  try {
+    const rows = db.getSalesByInventoryItemId(parseInt(req.params.id));
+    res.json({ success: true, rows: rows || [] });
+  } catch (e) {
+    console.error("Error fetching sales by inventory item:", e);
+    res.status(500).json({ success: false, rows: [] });
+  }
+});
+
+app.get("/api/inventory/:id/returned-orders", (req, res) => {
+  try {
+    const rows = db.getReturnedOrdersByInventoryItemId(parseInt(req.params.id));
+    res.json({ success: true, rows: rows || [] });
+  } catch (e) {
+    console.error("Error fetching returned orders by inventory item:", e);
+    res.status(500).json({ success: false, rows: [] });
+  }
+});
+
+app.get("/api/inventory/:id/supplier-orders", (req, res) => {
+  try {
+    const rows = db.getSupplierOrdersByInventoryItemId(parseInt(req.params.id));
+    res.json({ success: true, rows: rows || [] });
+  } catch (e) {
+    console.error("Error fetching supplier orders by inventory item:", e);
+    res.status(500).json({ success: false, rows: [] });
+  }
 });
 
 app.get("/api/inventory/sections/:id", (req, res) => {
@@ -657,6 +830,14 @@ app.get("/api/statistics", (req, res) => {
       netSalesTotal: 0,
       grossProfit: 0,
       grossProfitMargin: 0,
+      collections: 0,
+      allocatedCollections: 0,
+      unallocatedCollections: 0,
+      accountsReceivable: 0,
+      collectionRate: 0,
+      reconciliationWarnings: [],
+      profitLoss: null,
+      profitLossPeriods: {},
       inventoryTotalMeters: 0,
       inventoryTotalKilos: 0,
       years: [],
@@ -668,6 +849,70 @@ app.get("/api/statistics", (req, res) => {
         year: { count: 0, total: 0, paid: 0, remaining: 0, returned: 0 },
       },
     });
+  }
+});
+
+// تقرير الأرباح والخسائر (أساس الاستحقاق) لفترة محددة.
+// المدخلات المسموحة فقط: from / to بصيغة YYYY-MM-DD. كل الحساب يتم في الـbackend.
+const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
+const sanitizeDateParam = (value) => {
+  if (value === undefined || value === null) return null;
+  const text = String(value).trim();
+  if (!text) return null;
+  return ISO_DATE.test(text) ? text : undefined; // undefined = قيمة غير صالحة
+};
+
+app.get("/api/profit-loss", (req, res) => {
+  try {
+    const from = sanitizeDateParam(req.query?.from);
+    const to = sanitizeDateParam(req.query?.to);
+    if (from === undefined || to === undefined) {
+      return res.status(400).json({
+        success: false,
+        message: "صيغة التاريخ غير صحيحة. الصيغة المطلوبة YYYY-MM-DD",
+      });
+    }
+    const report = db.getProfitLoss({ from, to, includeDetails: true });
+    res.json(report);
+  } catch (error) {
+    console.error("/api/profit-loss failed:", error?.message || error);
+    res
+      .status(500)
+      .json({ success: false, message: "فشل حساب الأرباح والخسائر" });
+  }
+});
+
+app.get("/api/profit-loss/reconciliation", (req, res) => {
+  try {
+    const from = sanitizeDateParam(req.query?.from);
+    const to = sanitizeDateParam(req.query?.to);
+    if (from === undefined || to === undefined) {
+      return res.status(400).json({
+        success: false,
+        message: "صيغة التاريخ غير صحيحة. الصيغة المطلوبة YYYY-MM-DD",
+      });
+    }
+    res.json(db.getProfitLossReconciliation({ from, to }));
+  } catch (error) {
+    console.error("/api/profit-loss/reconciliation failed:", error?.message || error);
+    res.status(500).json({ success: false, message: "فشل حساب التسوية" });
+  }
+});
+
+app.delete("/api/statistics/top-selling/section", (req, res) => {
+  try {
+    const sectionName = (req.query?.name || "").toString().trim();
+    if (!sectionName) {
+      return res
+        .status(400)
+        .json({ success: false, message: "اسم القسم مطلوب" });
+    }
+    db.hideTopSellingSection(sectionName);
+    res.json({ success: true });
+  } catch (error) {
+    res
+      .status(500)
+      .json({ success: false, message: error.message || "فشل حذف القسم" });
   }
 });
 
@@ -711,19 +956,30 @@ app.get("/api/sales", (req, res) => {
 
 app.post("/api/sales", (req, res) => {
   try {
+    db.assertCustomerActive(req.body?.customer_id, req.body?.customer_name);
     const id = db.addSale(req.body);
     res.json({ success: true, id });
   } catch (e) {
-    res.status(500).json({ success: false });
+    if (e && e.code === "ARCHIVED_ACCOUNT") {
+      res.status(409).json({ success: false, code: e.code, message: e.message });
+    } else if (e && (e.code === "INSUFFICIENT_INVENTORY" || e.code === "INSUFFICIENT_ROLLS")) {
+      res.status(400).json({ success: false, code: e.code, message: e.message });
+    } else {
+      res.status(500).json({ success: false, message: "حدث خطأ أثناء الحفظ" });
+    }
   }
 });
 
 app.put("/api/sales/:id", (req, res) => {
   try {
-    db.updateSale(parseInt(req.params.id), req.body);
+    const result = db.updateSale(parseInt(req.params.id), req.body);
     res.json({ success: true });
   } catch (e) {
-    res.status(500).json({ success: false });
+    if (e && (e.code === "INSUFFICIENT_INVENTORY" || e.code === "INSUFFICIENT_ROLLS")) {
+      res.status(400).json({ success: false, code: e.code, message: e.message });
+    } else {
+      res.status(500).json({ success: false, message: "حدث خطأ أثناء التعديل" });
+    }
   }
 });
 
@@ -771,9 +1027,13 @@ app.get("/api/returned-orders/customer/:name", (req, res) => {
 
 app.post("/api/returned-orders", (req, res) => {
   try {
+    db.assertCustomerActive(req.body?.customer_id, req.body?.customer_name);
     const id = db.addReturnedOrder(req.body);
     res.json({ success: true, id });
   } catch (e) {
+    if (e && e.code === "ARCHIVED_ACCOUNT") {
+      return res.status(409).json({ success: false, code: e.code, message: e.message });
+    }
     res.status(500).json({ success: false });
   }
 });
@@ -1013,10 +1273,14 @@ app.get("/api/payments/customer/:name", (req, res) => {
 
 app.post("/api/payments", (req, res) => {
   try {
-    const { customer_name, amount, description, date } = req.body;
+    const { customer_name, customer_id, amount, description, date } = req.body;
+    db.assertCustomerActive(customer_id, customer_name);
     const result = db.addPayment(customer_name, amount, description, date);
     res.json({ success: true, id: result.lastInsertRowid });
   } catch (error) {
+    if (error && error.code === "ARCHIVED_ACCOUNT") {
+      return res.status(409).json({ success: false, code: error.code, message: error.message });
+    }
     res.status(500).json({ success: false, message: "خطأ في إضافة المدفوعات" });
   }
 });
@@ -1069,6 +1333,7 @@ app.get("/api/supplier-payments/supplier/:name", (req, res) => {
 app.post("/api/supplier-payments", (req, res) => {
   try {
     const { supplier_name, supplier_phone, supplier_id, amount, description, date } = req.body;
+    db.assertSupplierActive(supplier_id, supplier_name);
     const result = db.addSupplierPayment(
       supplier_name,
       amount,
@@ -1089,6 +1354,9 @@ app.post("/api/supplier-payments", (req, res) => {
     } catch {}
     res.json({ success: true, id: result.lastInsertRowid });
   } catch (error) {
+    if (error && error.code === "ARCHIVED_ACCOUNT") {
+      return res.status(409).json({ success: false, code: error.code, message: error.message });
+    }
     res
       .status(500)
       .json({ success: false, message: "خطأ في إضافة مدفوعات المورد" });

@@ -18,11 +18,14 @@ const makeApiCall = async (endpoint) => {
 // the ipcRenderer without exposing the entire object
 contextBridge.exposeInMainWorld('api', {
   // Suppliers API
-  getAllSuppliers: () => makeApiCall('/api/suppliers'),
+  // status: active (افتراضي) | archived | all — يخص قائمة الحسابات فقط
+  getAllSuppliers: (status = 'active') =>
+    makeApiCall(`/api/suppliers?status=${encodeURIComponent(status)}`),
   getSupplierStatistics: () => makeApiCall('/api/suppliers/statistics'),
   
   // Customers API
-  getAllCustomers: () => makeApiCall('/api/customers'),
+  getAllCustomers: (status = 'active') =>
+    makeApiCall(`/api/customers?status=${encodeURIComponent(status)}`),
   getCustomerStatistics: () => makeApiCall('/api/customers/statistics'),
   
   // Inventory API

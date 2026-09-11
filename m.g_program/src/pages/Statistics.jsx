@@ -17,6 +17,10 @@ function Statistics() {
   const [topSellingSearch, setTopSellingSearch] = useState('')
   const [deleteSectionDialogOpen, setDeleteSectionDialogOpen] = useState(false)
   const [pendingDeleteSectionName, setPendingDeleteSectionName] = useState('')
+  const [customFrom, setCustomFrom] = useState('')
+  const [customTo, setCustomTo] = useState('')
+  const [customProfitLoss, setCustomProfitLoss] = useState(null)
+  const [customLoading, setCustomLoading] = useState(false)
 
   const toggleSection = (sectionName) => {
     setExpandedSections(prev => ({ ...prev, [sectionName]: !prev[sectionName] }))
@@ -48,9 +52,35 @@ function Statistics() {
     }
   }
 
+  // تقرير الأرباح والخسائر لفترة مخصّصة — كل الحساب يتم في الـbackend
+  const fetchCustomProfitLoss = async (from, to) => {
+    if (!from || !to) return
+    try {
+      setCustomLoading(true)
+      const params = new URLSearchParams({ from, to })
+      const response = await fetch(apiUrl(`/api/profit-loss?${params.toString()}`))
+      const data = await response.json()
+      if (!response.ok || data?.success === false) {
+        throw new Error(data?.message || 'فشل حساب الفترة المخصّصة')
+      }
+      setCustomProfitLoss(data)
+    } catch (error) {
+      setCustomProfitLoss(null)
+      addNotification(error?.message || 'فشل حساب الفترة المخصّصة', 'error')
+    } finally {
+      setCustomLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    if (selectedPeriod !== 'custom') return
+    if (!customFrom || !customTo) return
+    fetchCustomProfitLoss(customFrom, customTo)
+  }, [selectedPeriod, customFrom, customTo])
+
   const handleExportExcel = () => {
     if (exportStatisticsToExcel(stats)) {
-      addNotification('تم تصدير الإحصائيات إلى Excel', 'success')
+      addNotification('تم تصدير الإحصائيات لملف إكسل', 'success')
     } else {
       addNotification('فشل التصدير', 'error')
     }
@@ -148,21 +178,23 @@ function Statistics() {
     }
   }
 
-  const calculateNetProfit = (periodData) => {
-    if (!periodData) return { netIncome: 0, netProfit: 0, netLoss: 0 }
-    
-    // استخدام بيانات السنة المفلترة إذا كانت متاحة
-    const yearData = selectedYear !== 'all' ? stats?.statsByYear?.[selectedYear] : null
-    const profitStats = yearData?.profit ?? {
-      netIncome: stats?.netIncome ?? 0,
-      netProfit: stats?.netProfit ?? 0,
-      netLoss: stats?.netLoss ?? 0,
+  // تقرير الأرباح والخسائر الخاص بالفترة/السنة المختارة (مصدر واحد لكل الأرقام)
+  const getActiveProfitLoss = () => {
+    if (!stats) return null
+    if (selectedYear !== 'all') {
+      return stats?.statsByYear?.[selectedYear]?.profitLoss ?? null
     }
-    
-    return { 
-      netIncome: profitStats.netIncome, 
-      netProfit: profitStats.netProfit, 
-      netLoss: profitStats.netLoss 
+    if (selectedPeriod === 'custom') return customProfitLoss
+    if (selectedPeriod === 'all') return stats?.profitLoss ?? null
+    return stats?.profitLossPeriods?.[selectedPeriod] ?? null
+  }
+
+  const calculateNetProfit = (pl) => {
+    if (!pl) return { netIncome: 0, netProfit: 0, netLoss: 0 }
+    return {
+      netIncome: pl.netProfit ?? 0,
+      netProfit: (pl.netProfit ?? 0) > 0 ? pl.netProfit : 0,
+      netLoss: pl.netLoss ?? 0,
     }
   }
 
@@ -214,6 +246,29 @@ function Statistics() {
     </div>
   )
 
+  // عنوان قسم داخل قائمة الأرباح والخسائر
+  const PLSectionLabel = ({ index, title, color = 'default' }) => {
+    const palette = {
+      green: 'text-green-600 border-green-500',
+      orange: 'text-orange-600 border-orange-500',
+      blue: 'text-blue-600 border-blue-500',
+      red: 'text-red-600 border-red-500',
+      emerald: 'text-emerald-600 border-emerald-500',
+      teal: 'text-teal-600 border-teal-500',
+      default: theme === 'dark' ? 'text-gray-300 border-gray-600' : 'text-gray-700 border-gray-400',
+    }
+    return (
+      <div className={`flex items-center gap-3 pt-2 border-r-4 pr-3 ${palette[color] || palette.default}`}>
+        <span className={`text-xs font-bold px-2 py-0.5 rounded-full ${
+          theme === 'dark' ? 'bg-gray-800' : 'bg-gray-100'
+        }`}>
+          {index}
+        </span>
+        <h3 className="text-base font-bold tracking-wide">{title}</h3>
+      </div>
+    )
+  }
+
   const SectionHeader = ({ title, icon, description }) => (
     <div className="mb-6">
       <div className="flex items-center gap-3 mb-2">
@@ -263,8 +318,28 @@ function Statistics() {
     )
   }
 
-  const periodData = getPeriodData(selectedPeriod)
-  const profitData = calculateNetProfit(periodData)
+  const activePL = getActiveProfitLoss()
+  const profitData = calculateNetProfit(activePL)
+
+  // كل أرقام الصفحة تُشتق من نفس تقرير الفترة حتى لا تختلط الفترات
+  const periodData = activePL
+    ? {
+        sales: {
+          count: activePL.salesCount ?? 0,
+          total: activePL.netSales ?? 0,
+          gross: activePL.grossSales ?? 0,
+          paid: activePL.collections ?? 0,
+          remaining: activePL.accountsReceivable ?? 0,
+          returned: activePL.salesReturns ?? 0,
+          returnedCount: activePL.returnsCount ?? 0,
+        },
+        expenses: {
+          count: (activePL.expensesCount ?? 0) + (activePL.otherIncomeCount ?? 0),
+          inside: activePL.otherIncome ?? 0,
+          outside: activePL.operatingExpenses ?? 0,
+        },
+      }
+    : getPeriodData(selectedPeriod)
 
   // الحصول على البيانات المفلترة حسب السنة إذا تم اختيار سنة
   const yearData = selectedYear !== 'all' ? stats?.statsByYear?.[selectedYear] : null
@@ -290,22 +365,45 @@ function Statistics() {
   // أكثر الأصناف مبيعاً حسب السنة
   const topSelling = yearData?.topSelling ?? stats?.topSelling ?? []
   
-  // بيانات الأرباح والخسائر حسب السنة
-  const profitStats = yearData?.profit ?? {
-    netIncome: stats?.netIncome ?? 0,
-    netProfit: stats?.netProfit ?? 0,
-    netLoss: stats?.netLoss ?? 0,
-    grossProfit: stats?.grossProfit ?? 0,
-    grossProfitMargin: stats?.grossProfitMargin ?? 0,
-    costOfSoldItems: stats?.costOfSoldItems ?? 0,
-    costOfReturned: stats?.costOfReturned ?? 0,
-    netCostOfSoldItems: stats?.netCostOfSoldItems ?? 0,
+  // بيانات الأرباح والخسائر (أساس الاستحقاق) للفترة/السنة المختارة
+  const pl = activePL ?? {
+    grossSales: 0, salesReturns: 0, netSales: 0,
+    cogs: 0, returnedCogs: 0, netCogs: 0, cogsCoverageRate: null,
+    actualReturnedCogs: 0, estimatedReturnedCogs: 0,
+    grossProfit: 0, grossProfitMargin: null,
+    operatingExpenses: 0, otherIncome: 0,
+    netProfit: 0, netLoss: 0, netProfitMargin: null,
+    collections: 0, collectionsFromSaleOrders: 0, collectionsFromSeparatePayments: 0,
+    allocatedCollections: 0, unallocatedCollections: 0, accountsReceivable: 0,
+    collectionRate: null, customersWithCredit: 0, customersWithReceivable: 0,
+    reconciliationWarnings: [], missingCostSummary: { count: 0, salesValue: 0 },
+    salesCount: 0, returnsCount: 0, expensesCount: 0, otherIncomeCount: 0,
   }
-  
+  const profitStats = {
+    netIncome: pl.netProfit ?? 0,
+    netProfit: (pl.netProfit ?? 0) > 0 ? pl.netProfit : 0,
+    netLoss: pl.netLoss ?? 0,
+    grossProfit: pl.grossProfit ?? 0,
+    grossProfitMargin: pl.grossProfitMargin ?? 0,
+    costOfSoldItems: pl.cogs ?? 0,
+    costOfReturned: pl.returnedCogs ?? 0,
+    netCostOfSoldItems: pl.netCogs ?? 0,
+  }
+  const periodLabel =
+    selectedYear !== 'all'
+      ? `سنة ${selectedYear}`
+      : selectedPeriod === 'today' ? 'اليوم'
+      : selectedPeriod === 'week' ? 'آخر أسبوع'
+      : selectedPeriod === 'month' ? 'هذا الشهر'
+      : selectedPeriod === 'year' ? 'هذه السنة'
+      : selectedPeriod === 'custom'
+        ? (customFrom && customTo ? `من ${customFrom} إلى ${customTo}` : 'فترة مخصّصة')
+        : 'كل الفترات'
+
   // بيانات المبيعات الإجمالية للملخص المالي
-  const salesTotalForSummary = yearData ? (yearData.sales.total + yearData.sales.returned) : (stats?.salesTotal ?? 0)
-  const returnedTotal = yearData?.sales?.returned ?? stats?.returnedTotal ?? 0
-  const returnedCount = stats?.returnedCount ?? 0
+  const salesTotalForSummary = pl.grossSales ?? 0
+  const returnedTotal = pl.salesReturns ?? 0
+  const returnedCount = pl.returnsCount ?? 0
 
   return (
     <div className="space-y-8">
@@ -349,7 +447,34 @@ function Statistics() {
             <option value="week">هذا الأسبوع</option>
             <option value="month">هذا الشهر</option>
             <option value="year">هذه السنة</option>
+            <option value="custom">فترة مخصّصة</option>
           </select>
+
+          {selectedPeriod === 'custom' && selectedYear === 'all' && (
+            <div className="flex items-center gap-2">
+              <input
+                type="date"
+                value={customFrom}
+                onChange={(e) => setCustomFrom(e.target.value)}
+                className={`px-3 py-2 rounded-lg border ${
+                  theme === 'dark'
+                    ? 'bg-gray-800 border-gray-700 text-white'
+                    : 'bg-white border-gray-300 text-gray-900'
+                }`}
+              />
+              <span className={theme === 'dark' ? 'text-gray-400' : 'text-gray-600'}>إلى</span>
+              <input
+                type="date"
+                value={customTo}
+                onChange={(e) => setCustomTo(e.target.value)}
+                className={`px-3 py-2 rounded-lg border ${
+                  theme === 'dark'
+                    ? 'bg-gray-800 border-gray-700 text-white'
+                    : 'bg-white border-gray-300 text-gray-900'
+                }`}
+              />
+            </div>
+          )}
           
           {/* Year Selector (للفترات الكاملة) */}
           <select
@@ -380,7 +505,7 @@ function Statistics() {
             <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 20 20">
               <path fillRule="evenodd" d="M3 17a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm3.293-7.707a1 1 0 011.414 0L9 10.586V3a1 1 0 112 0v7.586l1.293-1.293a1 1 0 111.414 1.414l-3 3a1 1 0 01-1.414 0l-3-3a1 1 0 010-1.414z" clipRule="evenodd" />
             </svg>
-            تصدير Excel
+            تصدير إكسل
           </button>
         </div>
       </div>
@@ -408,20 +533,23 @@ function Statistics() {
             <h3 className={`text-lg font-semibold mb-2 ${
               theme === 'dark' ? 'text-yellow-200' : 'text-yellow-800'
             }`}>
-              ملاحظة مهمة حول الأرباح والخسائر
+              ملاحظة مهمة عن المكسب والخسارة
             </h3>
             <p className={`text-sm leading-relaxed ${
               theme === 'dark' ? 'text-gray-300' : 'text-gray-700'
             }`}>
-              يتم حساب صافي الربح حسب المعايير المحاسبية: 
+              المكسب بيتحسب على <span className={`font-medium ${theme === 'dark' ? 'text-green-300' : 'text-green-600'}`}>قيمة الأوردر</span>،
+              مش على المبلغ اللي اتحصّل من العميل.
+              مثال: بعت بـ 1000 واتحصّلت 500 → اللي يدخل الحسبة 1000، والـ 500 الباقية فلوس عند العميل ومش بتقلل المكسب.
               <span className={`font-medium ${theme === 'dark' ? 'text-green-300' : 'text-green-600'}`}>
-                صافي الربح = المبيعات - تكلفة البضاعة المباعة - المصروفات الخارجية + المصروفات الداخلية
-              </span>. 
+                {' '}صافي المكسب = مجموع قيمة الأوردرات ناقص الراجع ناقص تكلفة البضاعة ناقص المصاريف وزائد الفلوس الداخلة التانية
+              </span>.
+              الفلوس اللي اتحصّلت بتظهر في قسم لوحدها ومش بتزوّد المكسب ولا بتنقصه. 
               <span className={`font-medium ${theme === 'dark' ? 'text-blue-300' : 'text-blue-600'}`}>
-                المخزون المتبقي يعتبر أصل ولا يُخصم من الأرباح
+                البضاعة اللي في المخزن بضاعتك ومش بتتشال من المكسب
               </span>، 
               <span className={`font-medium ${theme === 'dark' ? 'text-purple-300' : 'text-purple-600'}`}>
-                والمدفوعات للموردين هي سداد ديون ولا تؤثر مباشرة على الأرباح
+                والفلوس اللي بتدفعها للموردين سداد ديون ومش بتأثر على المكسب على طول
               </span>.
             </p>
           </div>
@@ -436,14 +564,14 @@ function Statistics() {
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1" />
           </svg>
         }
-        description="نظرة عامة على الوضع المالي للعمل"
+        description="نظرة سريعة على وضع الشغل"
       />
       
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-6">
         <StatCard
           title="إجمالي المبيعات"
           value={formatNumber(salesTotalForSummary)}
-          subtitle="جملة الأوردرات (قبل المرتجعات)"
+          subtitle="قيمة الأوردرات كاملة، مش التحصيل"
           color="green"
           icon={
             <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -466,7 +594,7 @@ function Statistics() {
         <StatCard
           title="صافي المبيعات"
           value={formatNumber(periodData?.sales?.total || 0)}
-          subtitle="بعد خصم المرتجعات"
+          subtitle="قيمة الأوردرات بعد شيل الراجع — سواء اتحصّلت أو لأ"
           color="green"
           icon={
             <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -475,9 +603,9 @@ function Statistics() {
           }
         />
         <StatCard
-          title="إجمالي المبلغ المسدد"
-          value={formatNumber(periodData?.sales.paid || 0)}
-          subtitle="ج.م"
+          title="الفلوس اللي اتحصّلت"
+          value={formatNumber(pl.collections)}
+          subtitle="حركة فلوس — مش مكسب"
           color="blue"
           icon={
             <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -485,11 +613,11 @@ function Statistics() {
             </svg>
           }
         />
-        {customersRemainingFromBackend > 0 && (
+        {(pl.accountsReceivable || 0) > 0 && (
           <StatCard
-            title="إجمالي المبلغ المتبقي"
-            value={formatNumber(customersRemainingFromBackend)}
-            subtitle="ج.م"
+            title="فلوس عند العملاء"
+            value={formatNumber(pl.accountsReceivable)}
+            subtitle="لسه متحصّلتش"
             color="red"
             icon={
               <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -710,19 +838,19 @@ function Statistics() {
 
       {/* Expenses Overview */}
       <SectionHeader
-        title="المصروفات"
+        title="المصاريف"
         icon={
           <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8c-4.418 0-8 1.79-8 4v4h16v-4c0-2.21-3.582-4-8-4z" />
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 16v2a2 2 0 002 2h8a2 2 0 002-2v-2" />
           </svg>
         }
-        description="تحليل المصروفات الداخلية والخارجية"
+        description="المصاريف الخارجة والفلوس الداخلة"
       />
       
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
         <StatCard
-          title="المصروفات الخارجية"
+          title="المصاريف الخارجة"
           value={formatNumber(periodData?.expenses.outside || 0)}
           subtitle="ج.م"
           color="red"
@@ -734,7 +862,7 @@ function Statistics() {
         />
         
         <StatCard
-          title="المصروفات الداخلية"
+          title="الفلوس الداخلة"
           value={formatNumber(periodData?.expenses.inside || 0)}
           subtitle="ج.م"
           color="green"
@@ -746,9 +874,9 @@ function Statistics() {
         />
         
         <StatCard
-          title="عدد المصروفات"
+          title="عدد المصاريف"
           value={periodData?.expenses.count || 0}
-          subtitle="مصروف"
+          subtitle="حركة"
           color="blue"
           icon={
             <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -761,21 +889,38 @@ function Statistics() {
 
       {/* Detailed Profit Calculation */}
       <SectionHeader
-        title="تفاصيل حساب الربح والخسارة"
+        title="حساب المكسب والخسارة"
         icon={
           <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 7h6m0 10v-3m-3 3h.01M9 17h.01M9 14h.01M12 14h.01M15 11h.01M12 11h.01M9 11h.01M7 21h10a2 2 0 002-2V5a2 2 0 00-2-2H7a2 2 0 00-2 2v14a2 2 0 002 2z" />
           </svg>
         }
-        description="المعادلة المحاسبية الكاملة لحساب صافي الربح"
+        description={`الحسبة على قيمة الأوردر كاملة حتى لو العميل دفع جزء بس · ${periodLabel}`}
       />
-      
+
+      {selectedPeriod === 'custom' && selectedYear === 'all' && (!customFrom || !customTo) && (
+        <div className={`p-4 rounded-lg border ${
+          theme === 'dark' ? 'bg-gray-800 border-gray-700 text-gray-300' : 'bg-gray-50 border-gray-200 text-gray-700'
+        }`}>
+          اختار تاريخ البداية وتاريخ النهاية علشان يظهرلك حساب الفترة.
+        </div>
+      )}
+      {customLoading && selectedPeriod === 'custom' && (
+        <div className={`p-4 rounded-lg border ${
+          theme === 'dark' ? 'bg-gray-800 border-gray-700 text-gray-300' : 'bg-gray-50 border-gray-200 text-gray-700'
+        }`}>
+          بيتم حساب الفترة المختارة...
+        </div>
+      )}
+
       <div className={`p-8 rounded-xl border-2 mb-8 ${
         theme === 'dark' 
           ? 'bg-gray-900 border-gray-700' 
           : 'bg-white border-gray-200'
       }`}>
         <div className="space-y-6">
+          <PLSectionLabel index="1" title="المبيعات (قيمة الأوردرات)" color="green" />
+
           {/* المبيعات */}
           <div className="flex items-center justify-between pb-4 border-b border-gray-300 dark:border-gray-700">
             <div className="flex items-center gap-4">
@@ -786,9 +931,9 @@ function Statistics() {
               </div>
               <div>
                 <div className={`text-sm font-medium ${theme === 'dark' ? 'text-gray-400' : 'text-gray-600'}`}>
-                  إجمالي المبيعات (إيرادات)
+                  إجمالي المبيعات
                 </div>
-                <div className="text-xs text-gray-500">إجمالي قيمة جميع عمليات البيع</div>
+                <div className="text-xs text-gray-500">مجموع قيمة الأوردر كاملة، سواء اتحصّلت أو لسه · {pl.salesCount} عملية</div>
               </div>
             </div>
             <div className="text-2xl font-bold text-green-600">
@@ -806,9 +951,9 @@ function Statistics() {
               </div>
               <div>
                 <div className={`text-sm font-medium ${theme === 'dark' ? 'text-gray-400' : 'text-gray-600'}`}>
-                  الأوردرات الراجعة (تطرح)
+                  الأوردرات الراجعة
                 </div>
-                <div className="text-xs text-gray-500">من كشوف حسابات العملاء · {stats?.returnedCount ?? 0} أوردر</div>
+                <div className="text-xs text-gray-500">بتتشال من المبيعات · {returnedCount} أوردر</div>
               </div>
             </div>
             <div className="text-2xl font-bold text-amber-600">
@@ -816,7 +961,7 @@ function Statistics() {
             </div>
           </div>
 
-          {/* صافي الإيرادات */}
+          {/* صافي الإيرادات / قيمة الأوردرات */}
           <div className="flex items-center justify-between pb-4 border-b border-gray-300 dark:border-gray-700">
             <div className="flex items-center gap-4">
               <div className="p-3 rounded-lg bg-emerald-100 text-emerald-600">
@@ -826,13 +971,62 @@ function Statistics() {
               </div>
               <div>
                 <div className={`text-sm font-medium ${theme === 'dark' ? 'text-gray-400' : 'text-gray-600'}`}>
-                  صافي الإيرادات
+                  صافي المبيعات
                 </div>
-                <div className="text-xs text-gray-500">المبيعات − المرتجعات</div>
+                <div className="text-xs text-gray-500">إجمالي قيمة الأوردرات ناقص الراجع · مش مبلغ التحصيل. مثال: بيع 1000 وتحصيل 500 → الحسبة على 1000</div>
               </div>
             </div>
             <div className="text-2xl font-bold text-emerald-600">
               = {formatNumber(periodData?.sales?.total ?? 0)}
+            </div>
+          </div>
+
+          <PLSectionLabel index="2" title="تكلفة البضاعة اللي اتباعت" color="orange" />
+
+          {/* تكلفة البضاعة المباعة الإجمالية */}
+          <div className="flex items-center justify-between pb-4 border-b border-gray-300 dark:border-gray-700">
+            <div className="flex items-center gap-4">
+              <div className="p-3 rounded-lg bg-orange-100 text-orange-600">
+                <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4" />
+                </svg>
+              </div>
+              <div>
+                <div className={`text-sm font-medium ${theme === 'dark' ? 'text-gray-400' : 'text-gray-600'}`}>
+                  تكلفة البضاعة اللي اتباعت
+                </div>
+                <div className="text-xs text-gray-500">
+                  سعر التكلفة المسجّل وقت البيع مضروب في الكمية
+                  {pl.cogsCoverageRate != null && ` · متسجّل تكلفتها ${formatNumber(pl.cogsCoverageRate)}% من المبيعات`}
+                </div>
+              </div>
+            </div>
+            <div className="text-2xl font-bold text-orange-600">
+              {formatNumber(pl.cogs)}
+            </div>
+          </div>
+
+          {/* تكلفة البضاعة المرتجعة */}
+          <div className="flex items-center justify-between pb-4 border-b border-gray-300 dark:border-gray-700">
+            <div className="flex items-center gap-4">
+              <div className="p-3 rounded-lg bg-amber-100 text-amber-600">
+                <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                </svg>
+              </div>
+              <div>
+                <div className={`text-sm font-medium ${theme === 'dark' ? 'text-gray-400' : 'text-gray-600'}`}>
+                  تكلفة البضاعة اللي رجعت (تتشال من التكلفة)
+                </div>
+                <div className="text-xs text-gray-500">
+                  من كمية وتكلفة الصنف: {formatNumber(pl.actualReturnedCogs)}
+                  {(pl.itemRatioReturnedCogs ?? 0) > 0 && ` · من نسبة تكلفة الصنف: ${formatNumber(pl.itemRatioReturnedCogs)}`}
+                  {(pl.estimatedReturnedCogs ?? 0) > 0 && ` · بالتقريب: ${formatNumber(pl.estimatedReturnedCogs)}`}
+                </div>
+              </div>
+            </div>
+            <div className="text-2xl font-bold text-amber-600">
+              − {formatNumber(pl.returnedCogs)}
             </div>
           </div>
 
@@ -846,15 +1040,19 @@ function Statistics() {
               </div>
               <div>
                 <div className={`text-sm font-medium ${theme === 'dark' ? 'text-gray-400' : 'text-gray-600'}`}>
-                  تكلفة البضاعة المباعة
+                  صافي تكلفة البضاعة
                 </div>
-                <div className="text-xs text-gray-500">تكلفة الأصناف المباعة فقط (وليس كل المشتريات)</div>
+                <div className="text-xs text-gray-500">
+                  تكلفة المباع ناقص تكلفة الراجع · وملهاش علاقة بالفلوس اللي اتحصّلت
+                </div>
               </div>
             </div>
             <div className="text-2xl font-bold text-orange-600">
-              − {formatNumber(profitStats.netCostOfSoldItems)}
+              = {formatNumber(pl.netCogs)}
             </div>
           </div>
+
+          <PLSectionLabel index="3" title="المكسب قبل المصاريف" color="blue" />
 
           {/* الربح الإجمالي */}
           <div className={`flex items-center justify-between pb-4 border-b-2 ${
@@ -868,15 +1066,20 @@ function Statistics() {
               </div>
               <div>
                 <div className={`text-sm font-medium ${theme === 'dark' ? 'text-gray-400' : 'text-gray-600'}`}>
-                  الربح الإجمالي (قبل المصروفات)
+                  المكسب قبل المصاريف
                 </div>
-                <div className="text-xs text-gray-500">صافي الإيرادات − تكلفة البضاعة المباعة</div>
+                <div className="text-xs text-gray-500">
+                  صافي المبيعات ناقص صافي تكلفة البضاعة
+                  {pl.grossProfitMargin != null && ` · يعني ${formatNumber(pl.grossProfitMargin)}% من صافي المبيعات`}
+                </div>
               </div>
             </div>
             <div className="text-2xl font-bold text-blue-600">
-              = {formatNumber(profitStats.grossProfit)}
+              = {formatNumber(pl.grossProfit)}
             </div>
           </div>
+
+          <PLSectionLabel index="4" title="المصاريف اللي طلعت" color="red" />
 
           {/* المصروفات الخارجية */}
           <div className="flex items-center justify-between pb-4 border-b border-gray-300 dark:border-gray-700">
@@ -888,15 +1091,17 @@ function Statistics() {
               </div>
               <div>
                 <div className={`text-sm font-medium ${theme === 'dark' ? 'text-gray-400' : 'text-gray-600'}`}>
-                  المصروفات الخارجية (تطرح)
+                  المصاريف اللي طلعت (خارج)
                 </div>
-                <div className="text-xs text-gray-500">إيجار، كهرباء، رواتب، صيانة، إلخ.</div>
+                <div className="text-xs text-gray-500">إيجار، كهربا، مرتبات، تصليحات، وهكذا.</div>
               </div>
             </div>
             <div className="text-2xl font-bold text-red-600">
-              - {formatNumber(periodData?.expenses?.outside ?? stats?.expensesOutside ?? 0)}
+              − {formatNumber(pl.operatingExpenses)}
             </div>
           </div>
+
+          <PLSectionLabel index="5" title="فلوس داخلة تانية" color="emerald" />
 
           {/* المصروفات الداخلية */}
           <div className="flex items-center justify-between pb-4 border-b-2 border-gray-600">
@@ -908,15 +1113,17 @@ function Statistics() {
               </div>
               <div>
                 <div className={`text-sm font-medium ${theme === 'dark' ? 'text-gray-400' : 'text-gray-600'}`}>
-                  المصروفات الداخلية (تضاف)
+                  فلوس داخلة تانية (داخل)
                 </div>
-                <div className="text-xs text-gray-500">إيرادات إضافية، مكافآت، عمولات، إلخ.</div>
+                <div className="text-xs text-gray-500">الحركات المسجّلة «داخل»: دخل إضافي، مكافآت، عمولات.</div>
               </div>
             </div>
             <div className="text-2xl font-bold text-emerald-600">
-              + {formatNumber(periodData?.expenses?.inside ?? stats?.expensesInside ?? 0)}
+              + {formatNumber(pl.otherIncome)}
             </div>
           </div>
+
+          <PLSectionLabel index="6" title="النتيجة في الآخر" color="green" />
 
           {/* صافي الربح/الخسارة */}
           <div className={`flex items-center justify-between pt-4 p-6 rounded-xl ${
@@ -942,10 +1149,11 @@ function Statistics() {
                 <div className={`text-lg font-bold ${
                   profitStats.netIncome >= 0 ? 'text-green-600' : 'text-red-600'
                 }`}>
-                  {profitStats.netIncome >= 0 ? 'صافي الربح' : 'صافي الخسارة'}
+                  {profitStats.netIncome >= 0 ? 'صافي المكسب' : 'صافي الخسارة'}
                 </div>
                 <div className="text-xs text-gray-500 mt-1">
-                  الربح الإجمالي - المصروفات الخارجية + المصروفات الداخلية
+                  محسوب على قيمة الأوردرات، مش على اللي اتحصّل من العميل
+                  {pl.netProfitMargin != null && ` · يعني ${formatNumber(pl.netProfitMargin)}% من صافي المبيعات`}
                 </div>
               </div>
             </div>
@@ -953,6 +1161,65 @@ function Statistics() {
               profitStats.netIncome >= 0 ? 'text-green-600' : 'text-red-600'
             }`}>
               = {formatNumber(Math.abs(profitStats.netIncome))} ج.م
+            </div>
+          </div>
+
+          <PLSectionLabel index="7" title="الفلوس المحصّلة واللي لسه عند العملاء" color="teal" />
+
+          <div className={`p-4 rounded-lg border-2 border-dashed ${
+            theme === 'dark' ? 'border-teal-700 bg-teal-900/10' : 'border-teal-300 bg-teal-50/60'
+          }`}>
+            <p className={`text-xs mb-4 ${theme === 'dark' ? 'text-teal-300' : 'text-teal-700'}`}>
+              الأرقام دي <strong>حركة فلوس وأرصدة</strong> ومش داخلة في حسبة المكسب اللي فوق.
+            </p>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div className={`flex items-center justify-between p-3 rounded-lg ${theme === 'dark' ? 'bg-gray-800' : 'bg-white'}`}>
+                <div>
+                  <div className={`text-sm font-medium ${theme === 'dark' ? 'text-gray-300' : 'text-gray-700'}`}>
+                    إجمالي الفلوس اللي اتحصّلت
+                  </div>
+                  <div className="text-xs text-gray-500">
+                    دفعات مع الأوردر {formatNumber(pl.collectionsFromSaleOrders)} · دفعات لوحدها {formatNumber(pl.collectionsFromSeparatePayments)}
+                  </div>
+                </div>
+                <div className="text-xl font-bold text-teal-600">{formatNumber(pl.collections)}</div>
+              </div>
+
+              <div className={`flex items-center justify-between p-3 rounded-lg ${theme === 'dark' ? 'bg-gray-800' : 'bg-white'}`}>
+                <div>
+                  <div className={`text-sm font-medium ${theme === 'dark' ? 'text-gray-300' : 'text-gray-700'}`}>
+                    فلوس متحصّلة في مقابل بيع فعلي
+                  </div>
+                  <div className="text-xs text-gray-500">
+                    اتحصّل {pl.collectionRate != null ? `${formatNumber(pl.collectionRate)}%` : '—'} من صافي المبيعات
+                  </div>
+                </div>
+                <div className="text-xl font-bold text-blue-600">{formatNumber(pl.allocatedCollections)}</div>
+              </div>
+
+              <div className={`flex items-center justify-between p-3 rounded-lg ${theme === 'dark' ? 'bg-gray-800' : 'bg-white'}`}>
+                <div>
+                  <div className={`text-sm font-medium ${theme === 'dark' ? 'text-gray-300' : 'text-gray-700'}`}>
+                    فلوس زيادة عن قيمة البيع (ليك عند العميل)
+                  </div>
+                  <div className="text-xs text-gray-500">
+                    مش بتتحسب مكسب · {pl.customersWithCredit || 0} عميل
+                  </div>
+                </div>
+                <div className="text-xl font-bold text-amber-600">{formatNumber(pl.unallocatedCollections)}</div>
+              </div>
+
+              <div className={`flex items-center justify-between p-3 rounded-lg ${theme === 'dark' ? 'bg-gray-800' : 'bg-white'}`}>
+                <div>
+                  <div className={`text-sm font-medium ${theme === 'dark' ? 'text-gray-300' : 'text-gray-700'}`}>
+                    فلوس لسه عند العملاء
+                  </div>
+                  <div className="text-xs text-gray-500">
+                    صافي المبيعات ناقص اللي اتحصّل منها · {pl.customersWithReceivable || 0} عميل
+                  </div>
+                </div>
+                <div className="text-xl font-bold text-red-600">{formatNumber(pl.accountsReceivable)}</div>
+              </div>
             </div>
           </div>
 
@@ -965,12 +1232,15 @@ function Statistics() {
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
               </svg>
               <div className={`text-sm ${theme === 'dark' ? 'text-gray-400' : 'text-gray-600'}`}>
-                <p className="font-semibold mb-2">ملاحظة هامة:</p>
+                <p className="font-semibold mb-2">الحسبة ماشية كده:</p>
                 <ul className="space-y-1 list-disc list-inside">
-                  <li>المرتجعات مسجّلة في <strong>كشوف حسابات العملاء</strong> وتُطرح من إجمالي المبيعات لحساب صافي الإيرادات</li>
-                  <li>تكلفة البضاعة المباعة تحسب <strong>للأصناف المباعة فقط</strong> وليس لكل المشتريات</li>
-                  <li>البضاعة المتبقية في المخزون لا تؤثر على الربح حتى يتم بيعها</li>
-                  <li>هامش الربح الإجمالي: {formatNumber(profitStats.grossProfitMargin)}%</li>
+                  <li>صافي المبيعات = مجموع قيمة الأوردرات ناقص الأوردرات الراجعة (حتى لو العميل دفع جزء بس)</li>
+                  <li>مثال: أوردر 1000 وتحصيل 500 → المبيعات 1000 والتحصيل 500 والباقي عند العميل 500</li>
+                  <li>صافي تكلفة البضاعة = تكلفة اللي اتباع ناقص تكلفة اللي رجع (بسعر تكلفة الصنف نفسه)</li>
+                  <li>المكسب قبل المصاريف = صافي المبيعات ناقص صافي تكلفة البضاعة</li>
+                  <li>صافي المكسب = المكسب قبل المصاريف ناقص المصاريف وزائد الفلوس الداخلة التانية</li>
+                  <li>الفلوس اللي اتحصّلت <strong>مش بتتحسب مكسب ولا بتقلّله</strong>، واللي لسه متحصّلش يبان كفلوس عند العملاء</li>
+                  <li>نسبة المكسب قبل المصاريف: {pl.grossProfitMargin != null ? `${formatNumber(pl.grossProfitMargin)}%` : '—'} · نسبة صافي المكسب: {pl.netProfitMargin != null ? `${formatNumber(pl.netProfitMargin)}%` : '—'}</li>
                 </ul>
               </div>
             </div>
@@ -978,40 +1248,34 @@ function Statistics() {
         </div>
       </div>
 
-      {/* Profit & Loss Analysis */}
+      {/* ملخص المكسب والخسارة */}
       <SectionHeader
-        title="ملخص الأرباح والخسائر"
+        title="ملخص المكسب والخسارة"
         icon={
           <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6" />
           </svg>
         }
-        description="نظرة سريعة على النتائج المالية"
+        description="نظرة سريعة على النتيجة"
       />
       
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
         <StatCard
-          title={profitData.netIncome >= 0 ? "صافي الدخل" : "صافي الخسارة"}
-          value={formatNumber(Math.abs(profitData.netIncome))}
-          subtitle="ج.م"
-          color={profitData.netIncome >= 0 ? 'green' : 'red'}
+          title="صافي المبيعات"
+          value={formatNumber(pl.netSales ?? 0)}
+          subtitle="قيمة الأوردرات بعد شيل الراجع"
+          color="blue"
           icon={
-            profitData.netIncome >= 0 ? (
-              <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6" />
-              </svg>
-            ) : (
-              <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 17h8m0 0V9m0 8l-8-8-4 4-6-6" />
-              </svg>
-            )
+            <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 7h6m0 10v-3m-3 3h.01M9 17h.01M9 14h.01M12 14h.01M15 11h.01M12 11h.01M9 11h.01M7 21h10a2 2 0 002-2V5a2 2 0 00-2-2H7a2 2 0 00-2 2v14a2 2 0 002 2z" />
+            </svg>
           }
         />
-        
+
         <StatCard
-          title="صافي الأرباح"
-          value={formatNumber(profitData.netProfit)}
-          subtitle="ج.م"
+          title="المكسب قبل المصاريف"
+          value={formatNumber(profitStats.grossProfit)}
+          subtitle="صافي المبيعات ناقص تكلفة البضاعة"
           color="green"
           icon={
             <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -1019,11 +1283,11 @@ function Statistics() {
             </svg>
           }
         />
-        
+
         <StatCard
           title={profitData.netIncome >= 0 ? "صافي المكسب" : "صافي الخسارة"}
-          value={formatNumber(profitData.netIncome >= 0 ? profitData.netProfit : profitData.netLoss)}
-          subtitle="ج.م"
+          value={formatNumber(Math.abs(profitData.netIncome))}
+          subtitle="بعد المصاريف والفلوس الداخلة التانية"
           color={profitData.netIncome >= 0 ? 'green' : 'red'}
           icon={
             profitData.netIncome >= 0 ? (
@@ -1174,7 +1438,7 @@ function Statistics() {
               <p className={`text-sm ${
                 theme === 'dark' ? 'text-gray-400' : 'text-gray-600'
               }`}>
-                الأصناف الأكثر طلباً من العملاء — مقسّمة حسب الأقسام (صافي بعد المرتجعات)
+                الأصناف اللي العملاء بيطلبوها أكتر — مقسّمة على الأقسام (بعد شيل الراجع)
               </p>
             </div>
 
@@ -1334,7 +1598,7 @@ function Statistics() {
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L3.732 16.5c-.77.833.192 2.5 1.732 2.5z" />
               </svg>
             }
-            description="أصناف تحتاج إلى إعادة تموين"
+            description="أصناف محتاجة تتجدد"
           />
           
           <div className={`rounded-xl border-2 border-red-200 ${

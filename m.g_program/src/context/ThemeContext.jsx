@@ -6,8 +6,8 @@ const ThemeContext = createContext()
 export const useTheme = () => useContext(ThemeContext)
 
 export const ThemeProvider = ({ children }) => {
-  const [theme, setTheme] = useState('dark')
-  const [appName, setAppName] = useState('M.G – نظام إدارة محل الأقمشة')
+  const [theme, setTheme] = useState('light')
+  const [appName, setAppName] = useState('M.G FASHION FABRIC')
 
   useEffect(() => {
     fetchSettings()
@@ -25,8 +25,8 @@ export const ThemeProvider = ({ children }) => {
     try {
       const response = await fetch(apiUrl('/api/settings'))
       const data = await response.json()
-      setTheme(data.theme || 'dark')
-      setAppName(data.app_name || 'M.G – نظام إدارة محل الأقمشة')
+      setTheme(data.theme || 'light')
+      setAppName(data.app_name || 'M.G FASHION FABRIC')
     } catch (error) {
       console.error('Error fetching settings:', error)
     }

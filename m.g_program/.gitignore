@@ -1,12 +1,15 @@
 node_modules/
 dist/
 build/
+release/
 .vscode/
 *.log
 *.db
 package-lock.json
 yarn.lock
 .DS_Store
+_archive_audit/
+_pl_audit/
 
 
 
