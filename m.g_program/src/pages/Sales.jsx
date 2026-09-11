@@ -1053,7 +1053,7 @@ function Sales() {
 
       {showModal && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className={`p-6 rounded-lg w-[45vw] max-w-2xl max-h-[90vh] overflow-y-auto ${theme === 'dark' ? 'bg-gray-900' : 'bg-white'}`}>
+          <div className={`p-7 rounded-xl w-[56vw] max-w-3xl max-h-[90vh] overflow-y-auto shadow-2xl ${theme === 'dark' ? 'bg-gray-900' : 'bg-white'}`}>
             <h3 className={`text-xl font-bold mb-4 ${theme === 'dark' ? 'text-camel' : 'text-brown'}`}>
               {editingId ? 'تعديل عملية بيع' : 'إضافة عملية بيع'}
             </h3>

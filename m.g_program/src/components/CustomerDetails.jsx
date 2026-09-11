@@ -242,7 +242,6 @@ function CustomerDetails({ customer, onClose, autoOpenOrder = false, orderOnly =
                 <div class="print-info">
                   <p><strong>اسم العميل:</strong> ${customer.name}</p>
                   <p><strong>حالة الحساب:</strong> ${accountStatus.status}${accountStatus.amount > 0 ? ` - ${formatNumber(accountStatus.amount)} ج.م` : ""}</p>
-                  ${fromOp != null && toOp != null ? `<p><strong>نطاق الطباعة:</strong> من العملية ${fromOp} إلى ${toOp}</p>` : ""}
                   <p><strong>التاريخ:</strong> ${new Date().toLocaleDateString("ar-EG")}</p>
                 </div>
               </td>
@@ -1500,10 +1499,11 @@ function CustomerDetails({ customer, onClose, autoOpenOrder = false, orderOnly =
   const TRANSACTION_PREVIEW_LIMIT = 15;
   const hasMoreTransactions =
     filteredTransactions.length > TRANSACTION_PREVIEW_LIMIT;
+  const displayTransactions = [...filteredTransactions].reverse();
   const visibleTransactions =
     showAllTransactions || !hasMoreTransactions
-      ? filteredTransactions
-      : filteredTransactions.slice(0, TRANSACTION_PREVIEW_LIMIT);
+      ? displayTransactions
+      : displayTransactions.slice(0, TRANSACTION_PREVIEW_LIMIT);
   const hiddenTransactionsCount = Math.max(
     0,
     filteredTransactions.length - TRANSACTION_PREVIEW_LIMIT
@@ -3204,7 +3204,7 @@ function CustomerDetails({ customer, onClose, autoOpenOrder = false, orderOnly =
           style={{ zIndex: 1000 }}
         >
           <div
-            className={`p-6 rounded-lg w-96 max-h-[90vh] overflow-y-auto ${
+            className={`p-7 rounded-xl w-full max-w-2xl min-h-[75vh] max-h-[90vh] overflow-y-auto shadow-2xl flex flex-col ${
               theme === "dark" ? "bg-gray-900" : "bg-white"
             }`}
           >
@@ -3240,7 +3240,8 @@ function CustomerDetails({ customer, onClose, autoOpenOrder = false, orderOnly =
               </button>
             </div>
 
-            <form onSubmit={handleOrderSubmit} className="space-y-4">
+            <form onSubmit={handleOrderSubmit} className="flex flex-col flex-1 min-h-0">
+              <div className="flex-1 flex flex-col justify-evenly gap-4">
               {/* Total Value Display */}
               {(orderFormData.quantity && orderFormData.price) && (
                 <div
@@ -3425,7 +3426,7 @@ function CustomerDetails({ customer, onClose, autoOpenOrder = false, orderOnly =
                 </>
               )}
 
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                 <div>
                   <label
                     className={`block text-sm font-semibold mb-1 ${
@@ -3597,6 +3598,7 @@ function CustomerDetails({ customer, onClose, autoOpenOrder = false, orderOnly =
                 </div>
               </div>
 
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div>
                 <label
                   className={`block text-sm font-semibold mb-1 ${
@@ -3618,7 +3620,7 @@ function CustomerDetails({ customer, onClose, autoOpenOrder = false, orderOnly =
                   onChange={(e) =>
                     setOrderFormData({ ...orderFormData, paid: e.target.value })
                   }
-                  className={`w-full px-3 py-2 rounded ${
+                  className={`w-full px-3 py-2.5 rounded ${
                     theme === "dark"
                       ? "bg-gray-800 text-white"
                       : "bg-gray-100 text-gray-900"
@@ -3645,7 +3647,7 @@ function CustomerDetails({ customer, onClose, autoOpenOrder = false, orderOnly =
                   onChange={(e) =>
                     setOrderFormData({ ...orderFormData, date: e.target.value })
                   }
-                  className={`w-full px-3 py-2 rounded ${
+                  className={`w-full px-3 py-2.5 rounded ${
                     theme === "dark"
                       ? "bg-gray-800 text-white"
                       : "bg-gray-100 text-gray-900"
@@ -3653,11 +3655,14 @@ function CustomerDetails({ customer, onClose, autoOpenOrder = false, orderOnly =
                   required
                 />
               </div>
+            </div>
 
-              <div className="flex gap-3 pt-4">
+              </div>
+
+              <div className="flex gap-3 pt-4 shrink-0">
                 <button
                   type="submit"
-                  className={`flex-1 py-2 px-4 rounded-lg font-semibold transition ${
+                  className={`flex-1 py-3 px-4 rounded-lg font-semibold transition ${
                     theme === "dark"
                       ? "bg-camel text-black hover:bg-camel/90"
                       : "bg-brown text-white hover:bg-brown/90"
@@ -3668,7 +3673,7 @@ function CustomerDetails({ customer, onClose, autoOpenOrder = false, orderOnly =
                 <button
                   type="button"
                   onClick={closeOrderModal}
-                  className="flex-1 py-2 px-4 bg-gray-500 text-white rounded-lg font-semibold hover:bg-gray-600 transition"
+                  className="flex-1 py-3 px-4 bg-gray-500 text-white rounded-lg font-semibold hover:bg-gray-600 transition"
                 >
                   إلغاء
                 </button>

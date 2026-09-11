@@ -839,7 +839,6 @@ function SupplierDetails({ supplier, onClose }) {
                 <div class="print-info">
                   <p><strong>اسم المورد:</strong> ${supplier.name}</p>
                   <p><strong>حالة الحساب:</strong> ${accountStatus.status}${accountStatus.amount > 0 ? ` - ${formatNumber(accountStatus.amount)} ج.م` : ""}</p>
-                  ${fromOp != null && toOp != null ? `<p><strong>نطاق الطباعة:</strong> من العملية ${fromOp} إلى ${toOp}</p>` : ""}
                   <p><strong>التاريخ:</strong> ${new Date().toLocaleDateString("ar-EG")}</p>
                 </div>
               </td>
@@ -989,10 +988,11 @@ function SupplierDetails({ supplier, onClose }) {
   const TRANSACTION_PREVIEW_LIMIT = 15;
   const hasMoreTransactions =
     filteredTransactions.length > TRANSACTION_PREVIEW_LIMIT;
+  const displayTransactions = [...filteredTransactions].reverse();
   const visibleTransactions =
     showAllTransactions || !hasMoreTransactions
-      ? filteredTransactions
-      : filteredTransactions.slice(0, TRANSACTION_PREVIEW_LIMIT);
+      ? displayTransactions
+      : displayTransactions.slice(0, TRANSACTION_PREVIEW_LIMIT);
   const hiddenTransactionsCount = Math.max(
     0,
     filteredTransactions.length - TRANSACTION_PREVIEW_LIMIT
@@ -2008,7 +2008,7 @@ function SupplierDetails({ supplier, onClose }) {
       {showOrderModal && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-[100] overflow-y-auto py-4">
           <div
-            className={`p-6 rounded-lg w-[550px] max-w-[90vw] max-h-[90vh] overflow-y-auto my-auto ${
+            className={`p-7 rounded-xl w-full max-w-3xl max-h-[90vh] overflow-y-auto my-auto shadow-2xl ${
               theme === "dark" ? "bg-gray-900" : "bg-white"
             }`}
           >
