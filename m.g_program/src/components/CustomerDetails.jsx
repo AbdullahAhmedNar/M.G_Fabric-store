@@ -29,6 +29,7 @@ function CustomerDetails({ customer, onClose, autoOpenOrder = false, orderOnly =
   const [selectedSectionId, setSelectedSectionId] = useState("");
   const [orderSelectedSectionId, setOrderSelectedSectionId] = useState("");
   const [orderItems, setOrderItems] = useState([]);
+  const [orderTotalPaid, setOrderTotalPaid] = useState("");
   const [showCompleteDialog, setShowCompleteDialog] = useState(false);
   const [paymentFormData, setPaymentFormData] = useState({
     amount: "",
@@ -896,22 +897,33 @@ function CustomerDetails({ customer, onClose, autoOpenOrder = false, orderOnly =
   };
 
   const getOrderPaidTotal = () => {
+    if (orderTotalPaid !== "") {
+      return Math.max(0, parseFloat(orderTotalPaid) || 0);
+    }
     return orderItems.reduce((sum, item) => sum + (parseFloat(item.paid) || 0), 0);
   };
 
   const submitStagedOrders = async () => {
     setShowCompleteDialog(false);
     if (orderItems.length === 0) return;
-    const paidAsTotal = parseFloat(orderFormData.paid) || 0;
-    const n = orderItems.length;
+    const hasTotalPayment = orderTotalPaid !== "";
+    const paidAsTotal = hasTotalPayment ? Math.max(0, parseFloat(orderTotalPaid) || 0) : 0;
+    const orderTotal = getOrderTotal();
+    if (hasTotalPayment && paidAsTotal > orderTotal) {
+      addNotification("المبلغ المسدد لا يمكن أن يكون أكبر من إجمالي الأوردر", "error");
+      return;
+    }
     try {
-      const paidPerItem = paidAsTotal > 0 ? paidAsTotal / n : 0;
       const orderGroupId = `order_${Date.now()}`;
+      let distributedPaid = 0;
 
       const promises = orderItems.map(async (item, i) => {
-        const itemPaid = paidAsTotal > 0
-          ? (i === n - 1 ? paidAsTotal - paidPerItem * (n - 1) : paidPerItem)
+        const itemPaid = hasTotalPayment
+          ? (i === orderItems.length - 1
+            ? paidAsTotal - distributedPaid
+            : (orderTotal > 0 ? paidAsTotal * ((item.total || 0) / orderTotal) : 0))
           : (parseFloat(item.paid) || 0);
+        if (hasTotalPayment && i < orderItems.length - 1) distributedPaid += itemPaid;
         const itemRemaining = (item.total || 0) - itemPaid;
         const invItem = item.inventory_item_id ? inventory.find(inv => inv.id == item.inventory_item_id) : null;
         const sectionId = invItem?.section_id || null;
@@ -951,6 +963,7 @@ function CustomerDetails({ customer, onClose, autoOpenOrder = false, orderOnly =
 
       addNotification(`تم إضافة ${orderItems.length} عملية بيع`, 'success');
       setOrderItems([]);
+      setOrderTotalPaid("");
       closeOrderModal();
       // reload orders
       const ordersRes = await fetch(
@@ -3480,6 +3493,19 @@ function CustomerDetails({ customer, onClose, autoOpenOrder = false, orderOnly =
                     <div className={`px-3 py-1 rounded text-sm font-bold ${theme === "dark" ? "bg-camel/20 text-camel border border-camel/30" : "bg-brown/20 text-brown border border-brown/30"}`}>
                       الإجمالي: {formatNumber(getOrderTotal())} ج.م
                     </div>
+                  </div>
+                  <div className={`mt-3 p-3 rounded-lg border ${theme === "dark" ? "border-camel/30 bg-camel/10" : "border-brown/20 bg-white"}`}>
+                    <label className="block text-sm font-semibold mb-1">المسدد على إجمالي الأوردر</label>
+                    <p className="text-xs opacity-75 mb-2">اختياري: اكتب المبلغ هنا ليتم توزيعه تلقائيًا على كل الأصناف.</p>
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.01"
+                      placeholder="مثال: 1000"
+                      value={orderTotalPaid}
+                      onChange={(e) => setOrderTotalPaid(e.target.value)}
+                      className={`w-full px-3 py-2 rounded ${theme === "dark" ? "bg-gray-900 text-white" : "bg-gray-100 text-gray-900"}`}
+                    />
                   </div>
                   <div className="space-y-2 max-h-40 overflow-y-auto">
                     {orderItems.map((item) => (

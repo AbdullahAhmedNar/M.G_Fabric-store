@@ -59,6 +59,7 @@ function SupplierDetails({ supplier, onClose }) {
   const [showNewSectionInput, setShowNewSectionInput] = useState(false);
   const [newSectionName, setNewSectionName] = useState("");
   const [orderItems, setOrderItems] = useState([]);
+  const [orderTotalPaid, setOrderTotalPaid] = useState("");
   const [orderDateInputValue, setOrderDateInputValue] = useState("");
 
   useEffect(() => {
@@ -560,7 +561,20 @@ function SupplierDetails({ supplier, onClose }) {
           return;
         }
 
-        const promises = orderItems.map(async (item) => {
+        const hasTotalPayment = orderTotalPaid !== "";
+        const totalPaid = hasTotalPayment ? Math.max(0, parseFloat(orderTotalPaid) || 0) : 0;
+        const orderTotal = getOrderTotal();
+        if (hasTotalPayment && totalPaid > orderTotal) {
+          addNotification("المبلغ المسدد لا يمكن أن يكون أكبر من إجمالي الأوردر", "error");
+          return;
+        }
+        const distributedPayments = hasTotalPayment && orderTotal > 0
+          ? orderItems.map((item, index) => index === orderItems.length - 1
+            ? totalPaid - orderItems.slice(0, -1).reduce((sum, stagedItem) => sum + totalPaid * ((stagedItem.total || 0) / orderTotal), 0)
+            : totalPaid * ((item.total || 0) / orderTotal))
+          : orderItems.map(() => 0);
+
+        const promises = orderItems.map(async (item, itemIndex) => {
           let sectionId = item.section_id;
           
           if (showNewSectionInput && newSectionName.trim() && !sectionId) {
@@ -576,7 +590,9 @@ function SupplierDetails({ supplier, onClose }) {
             }
           }
 
-          const itemPaid = parseFloat(item.paid) || 0;
+          const itemPaid = hasTotalPayment
+            ? distributedPayments[itemIndex]
+            : (parseFloat(item.paid) || 0);
           const itemTotal = item.total || 0;
           const itemRemaining = itemTotal - itemPaid;
 
@@ -619,6 +635,7 @@ function SupplierDetails({ supplier, onClose }) {
         setShowNewSectionInput(false);
         setNewSectionName("");
         setOrderItems([]);
+        setOrderTotalPaid("");
         fetchSupplierData();
         updateStatistics();
       }
@@ -2044,6 +2061,19 @@ function SupplierDetails({ supplier, onClose }) {
                     <div className={`px-3 py-1 rounded text-sm font-bold ${theme === "dark" ? "bg-camel/20 text-camel border border-camel/30" : "bg-brown/20 text-brown border border-brown/30"}`}>
                       الإجمالي: {formatNumber(getOrderTotal())} ج.م
                     </div>
+                  </div>
+                  <div className={`mt-3 p-3 rounded-lg border ${theme === "dark" ? "border-camel/30 bg-camel/10" : "border-brown/20 bg-white"}`}>
+                    <label className="block text-sm font-semibold mb-1">المسدد على إجمالي الأوردر</label>
+                    <p className="text-xs opacity-75 mb-2">اختياري: اكتب المبلغ هنا ليتم توزيعه تلقائيًا على كل الأصناف.</p>
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.01"
+                      placeholder="مثال: 1000"
+                      value={orderTotalPaid}
+                      onChange={(e) => setOrderTotalPaid(e.target.value)}
+                      className={`w-full px-3 py-2 rounded ${theme === "dark" ? "bg-gray-900 text-white" : "bg-gray-100 text-gray-900"}`}
+                    />
                   </div>
                   <div className="space-y-2 max-h-40 overflow-y-auto">
                     {orderItems.map((item) => (
