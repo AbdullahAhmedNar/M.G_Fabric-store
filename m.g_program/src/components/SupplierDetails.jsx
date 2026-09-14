@@ -1863,7 +1863,7 @@ function SupplierDetails({ supplier, onClose }) {
                   required
                 />
               </div>
-              <div className="flex gap-2">
+              <div className="flex gap-2 flex-nowrap flex-row-reverse items-center">
                 <button
                   type="submit"
                   className={`flex-1 py-2 rounded font-semibold ${

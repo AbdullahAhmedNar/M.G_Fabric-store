@@ -7,8 +7,9 @@ function ConfirmDialog({ open, title, message, confirmText = 'حذف', cancelTex
 
   const baseBg = theme === 'dark' ? 'bg-gray-900' : 'bg-white'
   const baseText = theme === 'dark' ? 'text-gray-200' : 'text-gray-800'
-  const overlay = 'fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50'
-  const panel = `w-[420px] rounded-lg p-5 ${baseBg} ${baseText} shadow-xl border ${theme === 'dark' ? 'border-gray-700' : 'border-gray-200'}`
+  // Make overlay z-index higher than modals so confirmation appears on top
+  const overlay = 'fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-[1100]'
+  const panel = `w-[520px] max-w-[95vw] rounded-lg p-5 ${baseBg} ${baseText} shadow-xl border ${theme === 'dark' ? 'border-gray-700' : 'border-gray-200'}`
   const dangerBg = theme === 'dark' ? 'bg-red-600 hover:bg-red-700' : 'bg-red-600 hover:bg-red-700'
   const neutralBg = theme === 'dark' ? 'bg-gray-700 hover:bg-gray-600 text-white' : 'bg-gray-200 hover:bg-gray-300 text-gray-900'
   const accent = theme === 'dark' ? 'text-camel' : 'text-brown'
@@ -22,7 +23,7 @@ function ConfirmDialog({ open, title, message, confirmText = 'حذف', cancelTex
           </svg>
           <h3 className="text-lg font-bold">{title || 'تأكيد الحذف'}</h3>
         </div>
-        <div className="text-sm mb-5 leading-relaxed">{message || 'هل أنت متأكد من عملية الحذف؟ لا يمكن التراجع.'}</div>
+        <div className="text-sm mb-5 leading-relaxed max-h-[60vh] overflow-auto">{message || 'هل أنت متأكد من عملية الحذف؟ لا يمكن التراجع.'}</div>
         <div className="flex gap-3">
           <button onClick={onConfirm} className={`flex-1 py-2 rounded font-semibold text-white ${dangerBg}`}>{confirmText}</button>
           <button onClick={onCancel} className={`flex-1 py-2 rounded font-semibold ${neutralBg}`}>{cancelText}</button>

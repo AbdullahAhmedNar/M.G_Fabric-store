@@ -1,6 +1,6 @@
 {
   "name": "mg-fabric-store",
-  "version": "2.2.1",
+  "version": "2.2.2",
   "description": "M.G - Fabric Store Management System - Complete Profit/Loss Calculation System",
   "main": "electron/main.js",
   "author": "M.G Systems",
@@ -19,6 +19,11 @@
     "sqlite"
   ],
   "changelog": {
+    "2.2.2": [
+      "✅ إضافة عرض تفصيلي للأصناف في حوار تأكيد إتمام البيع (قابل للتمرير)",
+      "✅ إصلاح ظهور صندوق التأكيد فوق المودالات الأخرى (z-index)",
+      "✅ إصلاح عرض زر '+ إضافة للقائمة' في مودال الموردين"
+    ],
     "2.2.1": [
       "✅ تكبير نافذة إضافة أوردر العملاء وتوزيع الحقول على ارتفاع الصفحة",
       "✅ إخفاء سطر نطاق الطباعة من كشف الحساب المطبوع",

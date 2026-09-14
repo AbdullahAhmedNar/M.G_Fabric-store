@@ -3,6 +3,7 @@ import { useTheme } from "../context/ThemeContext";
 import { useNotification } from "../context/NotificationContext";
 import { formatNumber } from "../utils/format";
 import SearchableSelect from "./SearchableSelect";
+import ConfirmDialog from "./ConfirmDialog";
 
 function CustomerDetails({ customer, onClose, autoOpenOrder = false, orderOnly = false }) {
   const { theme, appName } = useTheme();
@@ -27,6 +28,8 @@ function CustomerDetails({ customer, onClose, autoOpenOrder = false, orderOnly =
   const [inventory, setInventory] = useState([]);
   const [selectedSectionId, setSelectedSectionId] = useState("");
   const [orderSelectedSectionId, setOrderSelectedSectionId] = useState("");
+  const [orderItems, setOrderItems] = useState([]);
+  const [showCompleteDialog, setShowCompleteDialog] = useState(false);
   const [paymentFormData, setPaymentFormData] = useState({
     amount: "",
     description: "",
@@ -811,6 +814,158 @@ function CustomerDetails({ customer, onClose, autoOpenOrder = false, orderOnly =
     }
   };
 
+  const addItemToOrder = () => {
+    if (!orderFormData.description || !orderFormData.quantity || !orderFormData.price) {
+      addNotification('يرجى ملء جميع الحقول المطلوبة', 'error');
+      return;
+    }
+
+    if (orderFormData.from_inventory && orderFormData.inventory_item_id) {
+      const selectedItem = inventory.find((i) => i.id == orderFormData.inventory_item_id);
+      const rollsSoldVal = orderFormData.rolls_sold != null && orderFormData.rolls_sold !== '' ? parseInt(orderFormData.rolls_sold, 10) : null;
+      if (selectedItem) {
+        const availableQuantity = (selectedItem?.total_meters || 0) + (editingOrder?.inventory_item_id == orderFormData.inventory_item_id ? parseFloat(editingOrder?.quantity || 0) : 0);
+        const quantity = parseFloat(orderFormData.quantity) || 0;
+        if (quantity > availableQuantity) {
+          addNotification(`الكمية غير متوفرة في المخزون. المتاح: ${formatNumber(availableQuantity)} ${selectedItem?.unit || 'متر'} فقط`, 'error');
+          return;
+        }
+        if (!Number.isNaN(rollsSoldVal) && rollsSoldVal > 0) {
+          const availableRolls = (parseInt(selectedItem?.rolls_count, 10) || 0) + (editingOrder?.inventory_item_id == orderFormData.inventory_item_id ? parseInt(editingOrder?.rolls_sold, 10) || 0 : 0);
+          if (rollsSoldVal > availableRolls) {
+            addNotification(`عدد الأتواب (${rollsSoldVal}) أكبر من المتاح (${availableRolls})`, 'error');
+            return;
+          }
+        }
+      }
+    }
+
+    const quantity = parseFloat(orderFormData.quantity) || 0;
+    const price = parseFloat(orderFormData.price) || 0;
+    const total = quantity * price;
+    const paid = parseFloat(orderFormData.paid) || 0;
+
+    const newItem = {
+      description: orderFormData.description,
+      quantity,
+      price,
+      total,
+      paid,
+      unit: orderFormData.unit,
+      section_id: orderFormData.section_id,
+      inventory_item_id: orderFormData.inventory_item_id,
+      rolls_sold: orderFormData.rolls_sold,
+      from_inventory: orderFormData.from_inventory,
+      id: Date.now(),
+    };
+
+    setOrderItems([...orderItems, newItem]);
+    setOrderFormData({
+      ...orderFormData,
+      description: "",
+      quantity: "",
+      price: "",
+      paid: "",
+      inventory_item_id: "",
+      rolls_sold: "",
+    });
+  };
+
+  const removeItemFromOrder = (itemId) => {
+    setOrderItems(orderItems.filter(item => item.id !== itemId));
+  };
+
+  const editItemFromOrder = (item) => {
+    setOrderFormData({
+      ...orderFormData,
+      description: item.description,
+      quantity: item.quantity.toString(),
+      unit: item.unit,
+      price: item.price.toString(),
+      paid: item.paid != null ? String(item.paid) : "",
+      section_id: item.section_id || "",
+      inventory_item_id: item.inventory_item_id || "",
+      rolls_sold: item.rolls_sold ? item.rolls_sold.toString() : "",
+      from_inventory: !!item.from_inventory,
+    });
+    setOrderItems(orderItems.filter(i => i.id !== item.id));
+  };
+
+  const getOrderTotal = () => {
+    return orderItems.reduce((total, item) => total + (item.total || 0), 0);
+  };
+
+  const getOrderPaidTotal = () => {
+    return orderItems.reduce((sum, item) => sum + (parseFloat(item.paid) || 0), 0);
+  };
+
+  const submitStagedOrders = async () => {
+    setShowCompleteDialog(false);
+    if (orderItems.length === 0) return;
+    const paidAsTotal = parseFloat(orderFormData.paid) || 0;
+    const n = orderItems.length;
+    try {
+      const paidPerItem = paidAsTotal > 0 ? paidAsTotal / n : 0;
+      const orderGroupId = `order_${Date.now()}`;
+
+      const promises = orderItems.map(async (item, i) => {
+        const itemPaid = paidAsTotal > 0
+          ? (i === n - 1 ? paidAsTotal - paidPerItem * (n - 1) : paidPerItem)
+          : (parseFloat(item.paid) || 0);
+        const itemRemaining = (item.total || 0) - itemPaid;
+        const invItem = item.inventory_item_id ? inventory.find(inv => inv.id == item.inventory_item_id) : null;
+        const sectionId = invItem?.section_id || null;
+        const rollsSold = item.rolls_sold != null && item.rolls_sold !== '' ? parseInt(item.rolls_sold, 10) : null;
+
+        const payload = {
+          customer_name: customer.name,
+          description: item.description,
+          fromInventory: item.from_inventory || false,
+          inventory_item_id: item.inventory_item_id || null,
+          quantity: item.quantity,
+          unit: item.unit,
+          price: item.price,
+          paid: itemPaid,
+          total: item.total,
+          remaining: itemRemaining,
+          date: orderFormData.date,
+          order_group_id: orderGroupId,
+          section_id: sectionId,
+          rolls_sold: !isNaN(rollsSold) && rollsSold > 0 ? rollsSold : null,
+        };
+
+        const res = await fetch("http://localhost:3456/api/sales", {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+
+        if (!res.ok) {
+          const errData = await res.json().catch(() => null);
+          throw new Error(errData?.message || `فشل في حفظ الصنف: ${item.description}`);
+        }
+        return res.json();
+      });
+
+      await Promise.all(promises);
+
+      addNotification(`تم إضافة ${orderItems.length} عملية بيع`, 'success');
+      setOrderItems([]);
+      closeOrderModal();
+      // reload orders
+      const ordersRes = await fetch(
+        `http://localhost:3456/api/sales/by-customer?customer_id=${customer.id}`
+      );
+      const ordersJson = await ordersRes.json();
+      if (ordersJson && ordersJson.success && Array.isArray(ordersJson.rows)) {
+        setOrders(ordersJson.rows);
+      }
+      window.dispatchEvent(new CustomEvent('updateStatistics'));
+    } catch (err) {
+      addNotification('حدث خطأ أثناء الحفظ: ' + err.message, 'error');
+    }
+  };
+
   useEffect(() => {
     if (isArchivedAccount) return;
     if (autoOpenOrder || orderOnly) {
@@ -823,6 +978,11 @@ function CustomerDetails({ customer, onClose, autoOpenOrder = false, orderOnly =
   const handleOrderSubmit = async (e) => {
     e.preventDefault();
     try {
+      // If there are staged order items, show confirmation dialog instead of validating current empty form
+      if (orderItems.length > 0 && !editingOrder) {
+        setShowCompleteDialog(true);
+        return;
+      }
       const quantity = parseFloat(orderFormData.quantity) || 0;
       const price = parseFloat(orderFormData.price) || 0;
       const paid = parseFloat(orderFormData.paid) || 0;
@@ -2767,6 +2927,51 @@ function CustomerDetails({ customer, onClose, autoOpenOrder = false, orderOnly =
     </div>
       )}
 
+      <ConfirmDialog
+        open={showCompleteDialog}
+        title={`هل أنت متأكد من إتمام عملية البيع؟`}
+        message={
+          <div className="space-y-3 text-sm">
+            <div className="text-sm">عدد الأصناف: <strong>{orderItems.length}</strong></div>
+
+            <div className="max-h-[38vh] overflow-auto border rounded-md p-2 bg-gray-50 dark:bg-gray-800">
+              <table className="w-full text-right text-sm">
+                <thead>
+                  <tr className="text-xs text-gray-600 dark:text-gray-300">
+                    <th className="px-2 py-1">#</th>
+                    <th className="px-2 py-1">البيان</th>
+                    <th className="px-2 py-1">الكمية</th>
+                    <th className="px-2 py-1">سعر الوحدة</th>
+                    <th className="px-2 py-1">المجموع</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {orderItems.map((it, idx) => (
+                    <tr key={idx} className="border-t">
+                      <td className="px-2 py-1 text-gray-700 dark:text-gray-200">{idx + 1}</td>
+                      <td className="px-2 py-1 text-gray-700 dark:text-gray-200">{it.description || it.item_name || 'صنف'}</td>
+                      <td className="px-2 py-1 text-gray-700 dark:text-gray-200">{it.quantity} {it.unit || 'متر'}</td>
+                      <td className="px-2 py-1 text-gray-700 dark:text-gray-200">{formatNumber(it.price)} ج.م</td>
+                      <td className="px-2 py-1 text-gray-700 dark:text-gray-200">{formatNumber((Number(it.quantity) || 0) * (Number(it.price) || 0))} ج.م</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            <div className="space-y-1">
+              <div>الإجمالي: <strong>{formatNumber(getOrderTotal())} ج.م</strong></div>
+              <div>المسدد: <strong>{formatNumber(getOrderPaidTotal())} ج.م</strong></div>
+              <div>المتبقي: <strong>{formatNumber(Math.max(0, getOrderTotal() - getOrderPaidTotal()))} ج.م</strong></div>
+            </div>
+          </div>
+        }
+        confirmText="تأكيد وإتمام البيع"
+        cancelText="إلغاء"
+        onConfirm={submitStagedOrders}
+        onCancel={() => setShowCompleteDialog(false)}
+      />
+
       {/* Payment Modal */}
       {showTransactionDetailsModal && selectedTransactionDetails && (
         <div
@@ -3240,7 +3445,7 @@ function CustomerDetails({ customer, onClose, autoOpenOrder = false, orderOnly =
               </button>
             </div>
 
-            <form onSubmit={handleOrderSubmit} className="flex flex-col flex-1 min-h-0">
+            <form onSubmit={handleOrderSubmit} className="flex flex-col flex-1 min-h-0" noValidate={orderItems.length > 0}>
               <div className="flex-1 flex flex-col justify-evenly gap-4">
               {/* Total Value Display */}
               {(orderFormData.quantity && orderFormData.price) && (
@@ -3263,6 +3468,37 @@ function CustomerDetails({ customer, onClose, autoOpenOrder = false, orderOnly =
                         (parseFloat(orderFormData.price) || 0)
                     )}{" "}
                     ج.م
+                  </div>
+                </div>
+              )}
+
+              {/* Staged order items summary */}
+              {orderItems.length > 0 && (
+                <div className={`p-3 rounded ${theme === "dark" ? "bg-gray-800" : "bg-gray-100"}`}>
+                  <div className="flex justify-between items-center mb-2">
+                    <h4 className="font-semibold">الأصناف المضافة ({orderItems.length})</h4>
+                    <div className={`px-3 py-1 rounded text-sm font-bold ${theme === "dark" ? "bg-camel/20 text-camel border border-camel/30" : "bg-brown/20 text-brown border border-brown/30"}`}>
+                      الإجمالي: {formatNumber(getOrderTotal())} ج.م
+                    </div>
+                  </div>
+                  <div className="space-y-2 max-h-40 overflow-y-auto">
+                    {orderItems.map((item) => (
+                      <div key={item.id} className={`flex justify-between items-center p-2 rounded ${theme === "dark" ? "bg-gray-700" : "bg-white"}`}>
+                        <div className="flex-1">
+                          <div className="font-medium text-sm">{item.description}</div>
+                          <div className="text-xs text-gray-500">
+                            {item.quantity} {item.unit} × {formatNumber(item.price)} = {formatNumber(item.total)} ج.م
+                            {(parseFloat(item.paid) || 0) > 0 && (
+                              <span className={`mr-2 ${theme === "dark" ? "text-green-400" : "text-green-600"}`}> | مسدد: {formatNumber(item.paid)} ج.م</span>
+                            )}
+                          </div>
+                        </div>
+                        <div className="flex gap-1">
+                          <button onClick={() => editItemFromOrder(item)} className="p-2 text-blue-500 hover:text-blue-600">تعديل</button>
+                          <button onClick={() => removeItemFromOrder(item.id)} className="p-2 text-red-500 hover:text-red-600">حذف</button>
+                        </div>
+                      </div>
+                    ))}
                   </div>
                 </div>
               )}
@@ -3659,7 +3895,20 @@ function CustomerDetails({ customer, onClose, autoOpenOrder = false, orderOnly =
 
               </div>
 
-              <div className="flex gap-3 pt-4 shrink-0">
+              <div className="flex gap-3 flex-nowrap flex-row-reverse pt-4 shrink-0 items-center">
+                {!editingOrder && (
+                  <button
+                    type="button"
+                    onClick={addItemToOrder}
+                    className={`flex-1 py-3 px-4 rounded-lg font-semibold border-2 transition-colors ${
+                      theme === "dark"
+                        ? "border-camel/50 bg-camel/10 text-camel hover:bg-camel/20"
+                        : "border-brown/50 bg-brown/10 text-brown hover:bg-brown/20"
+                    }`}
+                  >
+                    + إضافة للقائمة
+                  </button>
+                )}
                 <button
                   type="submit"
                   className={`flex-1 py-3 px-4 rounded-lg font-semibold transition ${
@@ -3668,7 +3917,11 @@ function CustomerDetails({ customer, onClose, autoOpenOrder = false, orderOnly =
                       : "bg-brown text-white hover:bg-brown/90"
                   }`}
                 >
-                  {editingOrder ? "تحديث الأوردر" : "إضافة الأوردر"}
+                  {editingOrder
+                    ? "تحديث الأوردر"
+                    : orderItems.length > 0
+                    ? "إتمام عملية البيع"
+                    : "إضافة الأوردر"}
                 </button>
                 <button
                   type="button"
